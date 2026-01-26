@@ -203,20 +203,25 @@ class ClaudeCodeClient {
   // -------------------------------------------------------------------------
 
   send(message: WSClientMessage): void {
+    console.log('[ClaudeCodeClient] send called:', { type: message.type, mockMode: this.mockMode, wsState: this.ws?.readyState });
+
     if (this.mockMode) {
+      console.log('[ClaudeCodeClient] Using mock mode');
       this.handleMockMessage(message);
       return;
     }
 
     if (this.ws?.readyState !== WebSocket.OPEN) {
-      console.error('[ClaudeCodeClient] Cannot send message: not connected');
+      console.error('[ClaudeCodeClient] Cannot send message: not connected', this.ws?.readyState);
       return;
     }
 
+    console.log('[ClaudeCodeClient] Sending via WebSocket:', message);
     this.ws.send(JSON.stringify(message));
   }
 
   sendMessage(text: string, projectId?: string, skillName?: string): void {
+    console.log('[ClaudeCodeClient] sendMessage called:', { text, projectId, skillName, mockMode: this.mockMode, wsReady: this.ws?.readyState === WebSocket.OPEN });
     this.send({
       type: 'chat',
       message: text,

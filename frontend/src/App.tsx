@@ -67,15 +67,19 @@ function App() {
 
   // Handle sending messages
   const handleSend = (text: string) => {
+    console.log('[App] handleSend called:', { text, selectedProjectId: selectedProject?.id });
     try {
       // Check if message starts with a skill keyword
-      const skillMatch = text.match(/^[@\/](\w+)\s*/);
+      const skillMatch = text.match(/^[@\/](\w+)/);
       const skillName = skillMatch ? skillMatch[1] : undefined;
-      const cleanText = skillMatch ? text.replace(/^[@\/]\w+\s*/, '') : text;
 
-      sendMessage(cleanText, selectedProject?.id, skillName);
+      console.log('[App] Detected skill:', { skillName, originalText: text });
+
+      // Send the full text (including the slash command) to Claude
+      // Claude Code CLI will handle skill invocation based on the skillName parameter
+      sendMessage(text, selectedProject?.id, skillName);
     } catch (e) {
-      console.error('Send error:', e);
+      console.error('[App] Send error:', e);
       setError(String(e));
     }
   };

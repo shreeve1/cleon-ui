@@ -48,8 +48,22 @@ export default function PromptInput({
 
   const handleSubmit = () => {
     const trimmed = input.trim();
-    if (!trimmed || disabled || isStreaming) return;
+    console.log('[PromptInput] handleSubmit:', { input, trimmed, disabled, isStreaming });
 
+    if (!trimmed) {
+      console.log('[PromptInput] Blocked: empty message');
+      return;
+    }
+    if (disabled) {
+      console.log('[PromptInput] Blocked: input disabled');
+      return;
+    }
+    if (isStreaming) {
+      console.log('[PromptInput] Blocked: already streaming');
+      return;
+    }
+
+    console.log('[PromptInput] Sending:', trimmed);
     onSend(trimmed);
     setInput('');
 
