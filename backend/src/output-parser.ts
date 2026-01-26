@@ -1,4 +1,4 @@
-import { LogEntry, LogEventType } from './types';
+import { LogEntry, LogEventType } from './types.js';
 
 export interface ParsedEvent {
   type: LogEventType;
@@ -54,12 +54,13 @@ export class OutputParser {
         });
 
         // Update tracking
-        if (parsed.tokens) {
-          this.totalTokens += parsed.tokens;
-        }
-        if (parsed.cost) {
-          this.totalCost += parsed.cost;
-        }
+        // Note: tokens and cost tracking disabled - not part of LogEntry type
+        // if (parsed.tokens) {
+        //   this.totalTokens += parsed.tokens;
+        // }
+        // if (parsed.cost) {
+        //   this.totalCost += parsed.cost;
+        // }
       }
     }
 
@@ -105,9 +106,7 @@ export class OutputParser {
         type: 'TOOL',
         event: 'TOOL_CALL',
         content: trimmed,
-        agentName,
-        tokens: estimateTokens(trimmed),
-        cost: calculateCost(estimateTokens(trimmed), this.model, false)
+        agentName
       };
     }
 
@@ -117,9 +116,7 @@ export class OutputParser {
         type: 'TOOL',
         event: 'TOOL_RESULT',
         content: trimmed,
-        agentName,
-        tokens: estimateTokens(trimmed),
-        cost: calculateCost(estimateTokens(trimmed), this.model, true)
+        agentName
       };
     }
 
@@ -150,9 +147,7 @@ export class OutputParser {
       type: 'RESPONSE',
       event: 'RESPONSE',
       content: trimmed,
-      agentName,
-      tokens: estimateTokens(trimmed),
-      cost: calculateCost(estimateTokens(trimmed), this.model, true)
+      agentName
     };
   }
 

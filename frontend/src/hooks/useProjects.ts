@@ -39,10 +39,10 @@ export function useProjects(): UseProjectsReturn {
           id: p.id,
           name: p.name,
           path: p.path,
-          branch: p.gitBranch || 'main',
+          branch: p.branch || 'main',
           createdAt: p.createdAt || new Date(),
-          lastActivityAt: p.lastActivity || new Date(),
-          sessionCount: p.sessions?.length || 0,
+          lastActivityAt: p.lastActivityAt || new Date(),
+          sessionCount: p.sessionCount || 0,
         }));
 
         setProjects(formattedProjects);

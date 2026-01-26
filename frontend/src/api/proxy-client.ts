@@ -7,11 +7,28 @@
 import type {
   Project,
   Message,
-  ContentBlock,
   ConnectionState,
 } from '../types';
 
-const PROXY_API_URL = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:37287/api';
+// Dynamic API URL construction (mirrors pattern from claude-code.ts)
+const getProxyAPIURL = (): string => {
+  // Check environment variable override first
+  if (import.meta.env.VITE_PROXY_API_URL) {
+    return import.meta.env.VITE_PROXY_API_URL;
+  }
+
+  // Use current origin - works for localhost, IP addresses, and domain names
+  // In production: Same origin as the page (e.g., http://10.20.20.54:5175)
+  // In development: Vite dev server proxies /api to backend at port 5175
+  const protocol = window.location.protocol; // 'http:' or 'https:'
+  const hostname = window.location.hostname; // 'localhost' or '10.20.20.54'
+  const port = window.location.port; // '5175' or '5173' (dev)
+
+  // Construct URL: http://hostname:port/api
+  return `${protocol}//${hostname}:${port}/api`;
+};
+
+const PROXY_API_URL = getProxyAPIURL();
 
 // -----------------------------------------------------------------------------
 // Project API

@@ -9,25 +9,35 @@ import { ChatArea } from './components/ChatArea';
 import { SkillButtons } from './components/SkillButtons';
 import PromptInput from './components/PromptInput';
 import { ProjectSelector } from './components/ProjectSelector';
+import { SessionSelector } from './components/SessionSelector';
 import { StatusBar } from './components/StatusBar';
 import { useChat } from './hooks/useChat';
 import { useProjects } from './hooks/useProjects';
 import { useSkills } from './hooks/useSkills';
 import { useConnection } from './hooks/useConnection';
-import type { Skill } from './types';
+import { useSession } from './hooks/useSession';
+import type { Skill, SessionMetadata } from './types';
 
 function App() {
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   // Try-catch for hooks
-  let messages, isStreaming, sendMessage, projects, selectedProject, selectProject, skills, insertSkill, connectionState, connected, connect;
+  let messages, isStreaming, sendMessage, loadMessagesFromSession, setSessionId, setProjectPath, clearMessages;
+  let projects, selectedProject, selectProject;
+  let skills, insertSkill;
+  let connectionState, connected, connect;
+  let currentSession, sessions, createSession, loadSession, deleteSession, clearCurrentSession, listSessions;
 
   try {
     ({
       messages,
       isStreaming,
       sendMessage,
+      loadMessagesFromSession,
+      setSessionId,
+      setProjectPath,
+      clearMessages,
     } = useChat());
 
     ({
@@ -46,6 +56,16 @@ function App() {
       connected,
       connect,
     } = useConnection());
+
+    ({
+      currentSession,
+      sessions,
+      createSession,
+      loadSession,
+      deleteSession,
+      clearCurrentSession,
+      listSessions,
+    } = useSession());
   } catch (hookError) {
     console.error('Hook error:', hookError);
     return (
@@ -65,10 +85,87 @@ function App() {
     }
   }, [connect]);
 
-  // Handle sending messages
-  const handleSend = (text: string) => {
-    console.log('[App] handleSend called:', { text, selectedProjectId: selectedProject?.id });
+  // Reload sessions when project changes
+  useEffect(() => {
+    if (selectedProject) {
+      listSessions(selectedProject.path, 10);
+    }
+  }, [selectedProject, listSessions]);
+
+  // Session management handlers
+  const handleNewSession = async () => {
+    if (!selectedProject) {
+      console.warn('[App] No project selected');
+      return;
+    }
+
     try {
+      const session = await createSession(selectedProject.id, selectedProject.name, selectedProject.path);
+      if (session) {
+        setSessionId(session.id);
+        setProjectPath(selectedProject.path);
+        clearMessages();
+        console.log('[App] Created new session:', session.id);
+      }
+    } catch (e) {
+      console.error('[App] Failed to create session:', e);
+      setError(String(e));
+    }
+  };
+
+  const handleSelectSession = async (session: SessionMetadata | null) => {
+    if (!session || !selectedProject) {
+      clearCurrentSession();
+      setSessionId(null);
+      setProjectPath(null);
+      clearMessages();
+      return;
+    }
+
+    try {
+      const result = await loadSession(session.id, selectedProject.path);
+      if (result) {
+        setSessionId(session.id);
+        setProjectPath(selectedProject.path);
+        loadMessagesFromSession(result.messages);
+        console.log('[App] Loaded session:', session.id);
+      }
+    } catch (e) {
+      console.error('[App] Failed to load session:', e);
+      setError(String(e));
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!selectedProject) {
+      console.warn('[App] No project selected');
+      return;
+    }
+
+    try {
+      await deleteSession(sessionId, selectedProject.path);
+      console.log('[App] Deleted session:', sessionId);
+    } catch (e) {
+      console.error('[App] Failed to delete session:', e);
+    }
+  };
+
+  // Handle sending messages
+  const handleSend = async (text: string) => {
+    console.log('[App] handleSend called:', { text, selectedProjectId: selectedProject?.id, currentSessionId: currentSession?.id });
+
+    try {
+      // Create session if one doesn't exist
+      if (!currentSession && selectedProject) {
+        console.log('[App] No session exists, creating one...');
+        const session = await createSession(selectedProject.id, selectedProject.name, selectedProject.path);
+        if (session) {
+          setSessionId(session.id);
+          setProjectPath(selectedProject.path);
+          console.log('[App] Created session for message:', session.id);
+        }
+      }
+
       // Check if message starts with a skill keyword
       const skillMatch = text.match(/^[@\/](\w+)/);
       const skillName = skillMatch ? skillMatch[1] : undefined;
@@ -117,13 +214,28 @@ function App() {
         {/* Header */}
         <header className="flex-shrink-0 border-b border-border bg-background">
           <div className="flex items-center justify-between px-4 py-3">
-            {/* Left: Project selector */}
+            {/* Left: Project and Session selectors */}
             <div className="flex items-center gap-3">
               <ProjectSelector
                 projects={projects}
                 selectedProject={selectedProject}
                 onSelectProject={selectProject}
               />
+              <SessionSelector
+                sessions={sessions}
+                currentSession={currentSession}
+                onSelectSession={handleSelectSession}
+                onNewSession={handleNewSession}
+                onDeleteSession={handleDeleteSession}
+                disabled={!selectedProject}
+              />
+              <button
+                onClick={handleNewSession}
+                disabled={!selectedProject}
+                className="px-3 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                New Session
+              </button>
             </div>
 
             {/* Right: Title/branding */}

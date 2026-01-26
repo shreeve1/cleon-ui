@@ -1,5 +1,5 @@
 import { spawn, IPty } from 'node-pty';
-import { Agent, AgentStatus, LogEntry, LogEventType } from './types';
+import { Agent, AgentStatus, LogEntry, LogEventType } from './types.js';
 import { EventEmitter } from 'events';
 
 interface AgentProcess {

@@ -1,7 +1,9 @@
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { agentManager } from './agent-manager';
+import { agentManager } from './agent-manager.js';
+import { sessionManager } from './session-manager.js';
+import { projectManager } from './project-manager.js';
 import {
   ClientMessage,
   ServerMessage,
@@ -9,8 +11,13 @@ import {
   AgentDeletedMessage,
   AgentUpdatedMessage,
   LogMessage,
-  AgentsMessage
-} from './types';
+  AgentsMessage,
+  SessionCreatedMessage,
+  SessionLoadedMessage,
+  SessionsListMessage,
+  SessionDeletedMessage,
+  SessionErrorMessage
+} from './types.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -31,11 +38,17 @@ export class Server {
     this.server = createServer(this.app);
     this.clients = new Set();
 
+    // Middleware
+    this.app.use(express.json());
+
+    // REST API endpoints (must come before static files and SPA catch-all)
+    this.setupRestAPI();
+
     // Serve frontend static files
     const frontendDist = path.join(__dirname, '../../frontend/dist');
     this.app.use(express.static(frontendDist));
 
-    // Fallback to index.html for SPA routing
+    // Fallback to index.html for SPA routing (must be last)
     this.app.get('*', (_req, res) => {
       res.sendFile(path.join(frontendDist, 'index.html'));
     });
@@ -118,6 +131,189 @@ export class Server {
         type: 'log',
         entry
       } as LogMessage);
+    });
+  }
+
+  // =============================================================================
+  // REST API Endpoints
+  // =============================================================================
+
+  private setupRestAPI(): void {
+    // =============================================================================
+    // Project Endpoints
+    // =============================================================================
+
+    // GET /api/projects - List all projects
+    this.app.get('/api/projects', (_req, res) => {
+      try {
+        const projects = projectManager.listProjects();
+        res.json({ projects });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // GET /api/projects/:id - Get specific project
+    this.app.get('/api/projects/:id', (req, res) => {
+      try {
+        const projectId = req.params.id;
+        const project = projectManager.getProject(projectId);
+
+        if (!project) {
+          return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.json({ project });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // GET /api/projects/stats - Get project statistics
+    this.app.get('/api/projects/stats', (_req, res) => {
+      try {
+        const stats = projectManager.getProjectStats();
+        res.json(stats);
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // GET /api/health - Health check endpoint
+    this.app.get('/api/health', (_req, res) => {
+      try {
+        const stats = projectManager.getProjectStats();
+        res.json({
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+          projectsDir: projectManager.listProjects()[0]?.path || null,
+          projectCount: stats.totalProjects,
+          sessionCount: stats.totalSessions,
+        });
+      } catch (error) {
+        res.status(500).json({
+          status: 'error',
+          error: String(error)
+        });
+      }
+    });
+
+    // =============================================================================
+    // Session Endpoints
+    // =============================================================================
+
+    // GET /api/sessions - List all sessions
+    this.app.get('/api/sessions', (req, res) => {
+      try {
+        const projectPath = req.query.projectPath as string | undefined;
+        const userId = req.query.userId as string | undefined;
+        const limit = req.query.limit ? parseInt(req.query.limit as string) : undefined;
+        const sessions = sessionManager.listSessions(projectPath, userId, limit);
+        res.json({ sessions });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // GET /api/sessions/:id - Get session details
+    this.app.get('/api/sessions/:id', (req, res) => {
+      try {
+        const sessionId = req.params.id;
+        const projectPath = req.query.projectPath as string | undefined;
+
+        if (!projectPath) {
+          return res.status(400).json({ error: 'projectPath query parameter is required' });
+        }
+
+        const messages = sessionManager.loadSession(sessionId, projectPath);
+        const metadata = sessionManager.loadSessionMetadata(sessionId, projectPath);
+
+        if (!metadata) {
+          return res.status(404).json({ error: 'Session not found' });
+        }
+
+        res.json({ sessionId, messages, metadata });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // POST /api/sessions - Create new session
+    this.app.post('/api/sessions', (req, res) => {
+      try {
+        const { projectId, projectName, projectPath, userId } = req.body;
+
+        if (!projectId || !projectName) {
+          return res.status(400).json({ error: 'projectId and projectName are required' });
+        }
+
+        if (!projectPath) {
+          return res.status(400).json({ error: 'projectPath is required' });
+        }
+
+        const session = sessionManager.createSession(projectId, projectName, projectPath, userId);
+        res.json({ session });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // DELETE /api/sessions/:id - Delete session
+    this.app.delete('/api/sessions/:id', (req, res) => {
+      try {
+        const sessionId = req.params.id;
+        const projectPath = req.query.projectPath as string | undefined;
+
+        if (!projectPath) {
+          return res.status(400).json({ error: 'projectPath query parameter is required' });
+        }
+
+        const deleted = sessionManager.deleteSession(sessionId, projectPath);
+
+        if (!deleted) {
+          return res.status(404).json({ error: 'Session not found' });
+        }
+
+        res.json({ success: true, sessionId });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // PUT /api/sessions/:id/title - Update session title
+    this.app.put('/api/sessions/:id/title', (req, res) => {
+      try {
+        const sessionId = req.params.id;
+        const { title, projectPath } = req.body;
+
+        if (!title) {
+          return res.status(400).json({ error: 'title is required' });
+        }
+
+        if (!projectPath) {
+          return res.status(400).json({ error: 'projectPath is required' });
+        }
+
+        const updated = sessionManager.updateSessionTitle(sessionId, title, projectPath);
+
+        if (!updated) {
+          return res.status(404).json({ error: 'Session not found' });
+        }
+
+        res.json({ success: true, sessionId, title });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // GET /api/sessions/stats - Get session statistics
+    this.app.get('/api/sessions/stats', (_req, res) => {
+      try {
+        const stats = sessionManager.getSessionStats();
+        res.json(stats);
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
     });
   }
 
@@ -212,7 +408,7 @@ export class Server {
   }
 
   start(): void {
-    this.server.listen(PORT, '0.0.0.0', () => {
+    this.server.listen(PORT, () => {
       console.log(`Server running on http://0.0.0.0:${PORT}`);
       console.log(`WebSocket endpoint: ws://0.0.0.0:${PORT}${WS_PATH}`);
     });

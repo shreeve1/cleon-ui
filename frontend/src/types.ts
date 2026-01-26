@@ -58,6 +58,27 @@ export interface SessionEntry {
   branch?: string;
 }
 
+// Session Management Types
+export interface SessionMetadata {
+  id: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  lastActivityAt: string;
+  messageCount: number;
+  source: 'webui' | 'cli';
+  userId?: string;
+}
+
+export interface SessionMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: ContentBlock[] | string;
+  timestamp?: string;
+  model?: string;
+  skillName?: string;
+}
+
 // -----------------------------------------------------------------------------
 // Skill Types
 // -----------------------------------------------------------------------------
@@ -129,7 +150,7 @@ export interface WSMessage {
 
 // Client -> CLI
 export interface WSClientMessage extends WSMessage {
-  type: 'chat' | 'list_projects' | 'switch_project' | 'get_status';
+  type: 'chat' | 'list_projects' | 'switch_project' | 'get_status' | 'append_message' | 'create_session' | 'load_session' | 'list_sessions' | 'delete_session' | 'update_session_title';
 }
 
 export interface WSChatMessage extends WSClientMessage {

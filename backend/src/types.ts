@@ -78,15 +78,134 @@ export interface AgentsMessage extends WebSocketMessage {
   agents: Agent[];
 }
 
+// =============================================================================
+// Session Types
+// =============================================================================
+
+export interface SessionMetadata {
+  id: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  lastActivityAt: string;
+  messageCount: number;
+  source: 'webui' | 'cli';
+  userId?: string;
+}
+
+export interface SessionContentBlock {
+  type: 'text' | 'code' | 'tool_use' | 'tool_result';
+  text?: string;
+  code?: string;
+  language?: string;
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolOutput?: string;
+  toolStatus?: 'success' | 'error' | 'running';
+}
+
+export interface SessionMessage {
+  id?: string;
+  role: 'user' | 'assistant' | 'system';
+  content: SessionContentBlock[] | string;
+  timestamp?: string;
+  model?: string;
+  skillName?: string;
+}
+
+// Session WebSocket Messages - Client to Server
+export interface CreateSessionMessage extends WebSocketMessage {
+  type: 'create_session';
+  projectId: string;
+  projectName: string;
+  projectPath: string;
+  userId?: string;
+}
+
+export interface LoadSessionMessage extends WebSocketMessage {
+  type: 'load_session';
+  sessionId: string;
+  projectPath: string;
+}
+
+export interface ListSessionsMessage extends WebSocketMessage {
+  type: 'list_sessions';
+  userId?: string;
+  projectId?: string;
+  projectPath?: string;
+  limit?: number;
+}
+
+export interface DeleteSessionMessage extends WebSocketMessage {
+  type: 'delete_session';
+  sessionId: string;
+  projectPath: string;
+}
+
+export interface AppendMessageMessage extends WebSocketMessage {
+  type: 'append_message';
+  sessionId: string;
+  projectPath: string;
+  message: SessionMessage;
+}
+
+export interface UpdateSessionTitleMessage extends WebSocketMessage {
+  type: 'update_session_title';
+  sessionId: string;
+  title: string;
+  projectPath: string;
+}
+
+// Session WebSocket Messages - Server to Client
+export interface SessionCreatedMessage extends WebSocketMessage {
+  type: 'session_created';
+  session: SessionMetadata;
+}
+
+export interface SessionLoadedMessage extends WebSocketMessage {
+  type: 'session_loaded';
+  sessionId: string;
+  messages: SessionMessage[];
+  metadata: SessionMetadata;
+}
+
+export interface SessionsListMessage extends WebSocketMessage {
+  type: 'sessions_list';
+  sessions: SessionMetadata[];
+}
+
+export interface SessionDeletedMessage extends WebSocketMessage {
+  type: 'session_deleted';
+  sessionId: string;
+}
+
+export interface SessionErrorMessage extends WebSocketMessage {
+  type: 'session_error';
+  error: string;
+  sessionId?: string;
+}
+
 export type ClientMessage =
   | CreateAgentMessage
   | DeleteAgentMessage
   | CommandAgentMessage
-  | ListAgentsMessage;
+  | ListAgentsMessage
+  | CreateSessionMessage
+  | LoadSessionMessage
+  | ListSessionsMessage
+  | DeleteSessionMessage
+  | AppendMessageMessage
+  | UpdateSessionTitleMessage;
 
 export type ServerMessage =
   | AgentCreatedMessage
   | AgentDeletedMessage
   | AgentUpdatedMessage
   | LogMessage
-  | AgentsMessage;
+  | AgentsMessage
+  | SessionCreatedMessage
+  | SessionLoadedMessage
+  | SessionsListMessage
+  | SessionDeletedMessage
+  | SessionErrorMessage;

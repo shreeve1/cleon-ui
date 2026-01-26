@@ -18,7 +18,21 @@ import type {
 // Configuration
 // -----------------------------------------------------------------------------
 
-const CLI_WS_URL = import.meta.env.VITE_WS_HOST || 'ws://localhost:37287';
+// Use environment variable if set, otherwise construct from current hostname
+const getWebSocketURL = (): string => {
+  if (import.meta.env.VITE_WS_HOST) {
+    return import.meta.env.VITE_WS_HOST;
+  }
+
+  // Use the current hostname (works for localhost, IP addresses, and domain names)
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const hostname = window.location.hostname;
+  const port = '37287'; // Claude Code CLI WebSocket port
+
+  return `${protocol}//${hostname}:${port}`;
+};
+
+const CLI_WS_URL = getWebSocketURL();
 const MOCK_MODE = false; // Disabled - using real Claude Code CLI
 
 // -----------------------------------------------------------------------------
