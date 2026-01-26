@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { agentManager } from './agent-manager.js';
 import { sessionManager } from './session-manager.js';
 import { projectManager } from './project-manager.js';
+import { skillManager } from './skill-manager.js';
 import {
   ClientMessage,
   ServerMessage,
@@ -195,6 +196,20 @@ export class Server {
           status: 'error',
           error: String(error)
         });
+      }
+    });
+
+    // =============================================================================
+    // Skill Endpoints
+    // =============================================================================
+
+    // GET /api/skills - List all skills
+    this.app.get('/api/skills', (_req, res) => {
+      try {
+        const skills = skillManager.listSkills();
+        res.json({ skills });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
       }
     });
 
