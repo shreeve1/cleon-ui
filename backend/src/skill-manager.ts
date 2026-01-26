@@ -26,12 +26,14 @@ export interface Skill {
 export class SkillManager {
   private cachedSkills: Skill[] = [];
   private watcher: chokidar.FSWatcher | null = null;
+  private personalSkillsDir: string;
+  private projectSkillsDir: string;
 
-  constructor() {
-    // Initial load
+  constructor(personalDir?: string, projectDir?: string) {
+    this.personalSkillsDir = personalDir || path.join(homedir(), '.claude', 'skills');
+    this.projectSkillsDir = projectDir || path.join(process.cwd(), '.claude', 'skills');
+
     this.loadSkills();
-
-    // Start file watching
     this.startWatching();
   }
 
@@ -44,8 +46,8 @@ export class SkillManager {
    * Merges: personal skills override project skills with same name
    */
   private loadSkills(): void {
-    const personalSkills = this.discoverSkills(PERSONAL_SKILLS_DIR);
-    const projectSkills = this.discoverSkills(PROJECT_SKILLS_DIR);
+    const personalSkills = this.discoverSkills(this.personalSkillsDir);
+    const projectSkills = this.discoverSkills(this.projectSkillsDir);
 
     // Merge: personal overwrites project
     const skillMap = new Map<string, Skill>();
@@ -151,11 +153,11 @@ export class SkillManager {
   private startWatching(): void {
     const directoriesToWatch: string[] = [];
 
-    if (fs.existsSync(PERSONAL_SKILLS_DIR)) {
-      directoriesToWatch.push(PERSONAL_SKILLS_DIR);
+    if (fs.existsSync(this.personalSkillsDir)) {
+      directoriesToWatch.push(this.personalSkillsDir);
     }
-    if (fs.existsSync(PROJECT_SKILLS_DIR)) {
-      directoriesToWatch.push(PROJECT_SKILLS_DIR);
+    if (fs.existsSync(this.projectSkillsDir)) {
+      directoriesToWatch.push(this.projectSkillsDir);
     }
 
     if (directoriesToWatch.length === 0) {
