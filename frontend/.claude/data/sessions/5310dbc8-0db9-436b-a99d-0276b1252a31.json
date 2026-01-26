@@ -1,0 +1,13 @@
+{
+  "session_id": "5310dbc8-0db9-436b-a99d-0276b1252a31",
+  "prompts": [
+    "<task-notification>\n<task-id>bf940bb</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/bf940bb.output</output-file>\n<status>failed</status>\n<summary>Background command \"Check page content in Chrome\" failed with exit code 1</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/bf940bb.output",
+    "<task-notification>\n<task-id>b937493</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/b937493.output</output-file>\n<status>completed</status>\n<summary>Background command \"Refresh Chrome\" completed (exit code 0)</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/b937493.output",
+    "<task-notification>\n<task-id>b51eef0</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/b51eef0.output</output-file>\n<status>failed</status>\n<summary>Background command \"Start frontend dev server\" failed with exit code 137</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/b51eef0.output",
+    "yes I'm seeing:TEST APP - If you see this, React is working",
+    "<task-notification>\n<task-id>b5289fa</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/b5289fa.output</output-file>\n<status>failed</status>\n<summary>Background command \"Clear Vite cache and restart dev server\" failed with exit code 144</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/b5289fa.output",
+    "blank page console: Download the React DevTools for a better development experience: https://reactjs.org/link/react-devtools\nclaude-code.ts:21 Uncaught ReferenceError: process is not defined\n    at claude-code.ts:21:20Understand this error\n:5174/favicon.ico:1  Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "this is working! \ntest\n\n02:59 PM\nclaude-sonnet-4-5-20250514\nI received your message: \"test\"\n\n\nMock Mode Active\n\nThis is a simulated response. In production, this would communicate with the Claude Code CLI via WebSocket to:\n\n\u2022 Process your request with full context\n\n\u2022 Execute tools (bash, edit, read, grep, etc.)\n\n\u2022 Stream responses in real-time\n\n\u2022 Track conversation history in the project session\n\n",
+    "/ulw make sure to document then move on to real cli integration "
+  ]
+}

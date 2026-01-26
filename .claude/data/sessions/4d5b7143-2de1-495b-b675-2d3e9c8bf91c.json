@@ -1,0 +1,6 @@
+{
+  "session_id": "4d5b7143-2de1-495b-b675-2d3e9c8bf91c",
+  "prompts": [
+    "claude --print < TASK.md"
+  ]
+}

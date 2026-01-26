@@ -1,0 +1,12 @@
+{
+  "session_id": "dcdb4e3f-aadf-4f50-b3a9-59bdc61fe740",
+  "prompts": [
+    "can you start both to test",
+    "can you modify so other devices can connect",
+    "<task-notification>\n<task-id>b525a84</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/b525a84.output</output-file>\n<status>failed</status>\n<summary>Background command \"Start frontend dev server on port 5173\" failed with exit code 137</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/b525a84.output",
+    "<task-notification>\n<task-id>b600589</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/b600589.output</output-file>\n<status>failed</status>\n<summary>Background command \"Start backend dev server on port 5175\" failed with exit code 137</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/b600589.output",
+    "<task-notification>\n<task-id>bc27c37</task-id>\n<output-file>/private/tmp/claude/-Users-james-1-testytech-webui/tasks/bc27c37.output</output-file>\n<status>failed</status>\n<summary>Background command \"Start frontend dev server on all interfaces\" failed with exit code 137</summary>\n</task-notification>\nRead the output file to retrieve the result: /private/tmp/claude/-Users-james-1-testytech-webui/tasks/bc27c37.output",
+    "can you open this in chrome and try to send a test task from the webui",
+    "/ulw I like the webui that we have but I think I want to move away from trying to use the webui as an orchastrator and more of just a frontend for claude code that makes it easy to use on mobile. I would like to be able to select a project from /Users/james/.claude/projects. I would like to be able to have buttons for skills, commands like in @\"screenshot/Screenshot 2026-01-25 124027.png\" interview me for more info"
+  ]
+}
