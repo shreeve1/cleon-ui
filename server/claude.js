@@ -10,12 +10,20 @@ const activeSessions = new Map();
  * Handle incoming chat message from WebSocket
  */
 export async function handleChat(msg, ws) {
-  const { content, projectPath, sessionId, isNewSession } = msg;
+  const { content, projectPath, sessionId, isNewSession, mode } = msg;
 
-  // Build SDK options
+  const permissionModeMap = {
+    'default': 'default',
+    'plan': 'plan',
+    'bypass': 'bypassPermissions'
+  };
+  const permissionMode = permissionModeMap[mode] || 'default';
+  
+
+
   const options = {
     cwd: projectPath,
-    permissionMode: 'bypassPermissions',
+    permissionMode,
     systemPrompt: { type: 'preset', preset: 'claude_code' },
     settingSources: ['project', 'user', 'local']
   };
@@ -37,11 +45,15 @@ export async function handleChat(msg, ws) {
   try {
     console.log(`[Claude] Starting query - project: ${projectPath}, session: ${sessionId || 'NEW'}`);
 
-    // Create SDK query - returns async generator
     queryInstance = query({
       prompt: content,
       options
     });
+
+    const isResuming = sessionId && !isNewSession;
+    if (isResuming) {
+      await queryInstance.setPermissionMode(permissionMode);
+    }
 
     // Track for abort
     if (currentSessionId) {

@@ -5,8 +5,43 @@ const state = {
   currentProject: null,
   currentSessionId: null,
   isStreaming: false,
-  pendingText: ''
+  pendingText: '',
+  customCommands: [],
+  modeIndex: 2,
+  currentMode: 'bypass'
 };
+
+// Mode configuration
+const MODES = [
+  { name: 'default', label: 'Default', color: 'var(--neon-cyan)' },
+  { name: 'plan', label: 'Plan Mode', color: 'var(--neon-green)' },
+  { name: 'bypass', label: 'Bypass Permissions', color: 'var(--neon-red)' }
+];
+
+// Favorites storage utilities
+function getFavorites() {
+  try {
+    return JSON.parse(localStorage.getItem('favoriteProjects') || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function toggleFavorite(projectPath) {
+  const favorites = getFavorites();
+  const index = favorites.indexOf(projectPath);
+  if (index === -1) {
+    favorites.push(projectPath);
+  } else {
+    favorites.splice(index, 1);
+  }
+  localStorage.setItem('favoriteProjects', JSON.stringify(favorites));
+  return index === -1; // returns true if now favorited
+}
+
+function isFavorite(projectPath) {
+  return getFavorites().includes(projectPath);
+}
 
 function parseHash() {
   const hash = window.location.hash.slice(1);
@@ -59,10 +94,61 @@ const newSessionBtn = $('#new-session-btn');
 const chatForm = $('#chat-form');
 const chatInput = $('#chat-input');
 const sendBtn = $('#send-btn');
+const modeBtn = $('#mode-btn');
 const messagesEl = $('#messages');
 const abortBtn = $('#abort-btn');
 const projectNameEl = $('#project-name');
 const tokenUsageEl = $('#token-usage');
+const slashCommandsEl = $('#slash-commands');
+
+// Built-in commands (always available)
+const BUILTIN_COMMANDS = [
+  { name: '/compact', desc: 'Use compact mode for shorter responses', source: 'builtin' },
+  { name: '/verbose', desc: 'Use verbose mode for detailed responses', source: 'builtin' },
+  { name: '/clear', desc: 'Clear the current conversation', source: 'builtin' },
+  { name: '/help', desc: 'Show available commands', source: 'builtin' },
+  { name: '/model', desc: 'Show or change the current model', source: 'builtin' },
+  { name: '/tokens', desc: 'Show current token usage', source: 'builtin' },
+  { name: '/context', desc: 'Show context window information', source: 'builtin' },
+  { name: '/reset', desc: 'Reset conversation context', source: 'builtin' }
+];
+
+// Get all commands merged (builtin + global + project)
+function getAllCommands() {
+  const commandMap = new Map();
+
+  // Add built-in commands first
+  for (const cmd of BUILTIN_COMMANDS) {
+    commandMap.set(cmd.name, cmd);
+  }
+
+  // Custom commands (global + project) override built-in if same name
+  for (const cmd of state.customCommands) {
+    commandMap.set(cmd.name, {
+      name: cmd.name,
+      desc: cmd.description,
+      source: cmd.source
+    });
+  }
+
+  return Array.from(commandMap.values());
+}
+
+// Load custom commands from the API
+async function loadCustomCommands(projectPath = null) {
+  try {
+    let url = '/api/commands';
+    if (projectPath) {
+      url += `?projectPath=${encodeURIComponent(projectPath)}`;
+    }
+    state.customCommands = await api(url);
+  } catch (err) {
+    console.warn('[Commands] Failed to load custom commands:', err);
+    state.customCommands = [];
+  }
+}
+
+let slashCommandSelectedIndex = -1;
 
 async function init() {
   const status = await api('/api/auth/status').catch(() => ({ needsSetup: true }));
@@ -88,6 +174,7 @@ function showMain() {
   authScreen.classList.add('hidden');
   mainScreen.classList.remove('hidden');
   connectWebSocket();
+  loadCustomCommands(); // Load global commands initially
   restoreFromHash();
 }
 
@@ -252,9 +339,10 @@ function finishStreaming() {
   abortBtn.classList.add('hidden');
   chatInput.disabled = false;
   sendBtn.disabled = false;
-  
+  modeBtn.disabled = false;
+
   flushPendingText();
-  
+
   const streamingEl = messagesEl.querySelector('.message.streaming');
   if (streamingEl) {
     streamingEl.classList.remove('streaming');
@@ -359,22 +447,26 @@ chatForm.addEventListener('submit', (e) => {
 });
 
 function sendMessage(content) {
+  const mode = MODES[state.modeIndex];
+
   state.ws.send(JSON.stringify({
     type: 'chat',
-    content,
+    content: content,
+    mode: mode.name,
     projectPath: state.currentProject.path,
     sessionId: state.currentSessionId,
     isNewSession: !state.currentSessionId
   }));
-  
+
   appendMessage('user', content);
   chatInput.value = '';
   chatInput.style.height = 'auto';
-  
+
   state.isStreaming = true;
   abortBtn.classList.remove('hidden');
   chatInput.disabled = true;
   sendBtn.disabled = true;
+  modeBtn.disabled = true;
 }
 
 chatInput.addEventListener('input', () => {
@@ -383,11 +475,153 @@ chatInput.addEventListener('input', () => {
 });
 
 chatInput.addEventListener('keydown', (e) => {
+  // Shift+Tab cycles through modes
+  if (e.key === 'Tab' && e.shiftKey) {
+    e.preventDefault();
+    cycleMode();
+    return;
+  }
+  if (slashCommandsEl && !slashCommandsEl.classList.contains('hidden')) {
+    if (handleSlashCommandKeydown(e)) return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     chatForm.dispatchEvent(new Event('submit'));
   }
 });
+
+chatInput.addEventListener('input', handleSlashCommandInput);
+chatInput.addEventListener('blur', () => {
+  setTimeout(hideSlashCommands, 150);
+});
+
+function handleSlashCommandInput() {
+  const value = chatInput.value;
+
+  if (!value.startsWith('/')) {
+    hideSlashCommands();
+    return;
+  }
+
+  const query = value.slice(1).toLowerCase();
+  const allCommands = getAllCommands();
+  const filtered = allCommands.filter(cmd =>
+    cmd.name.toLowerCase().includes(query) ||
+    cmd.desc.toLowerCase().includes(query)
+  );
+
+  if (filtered.length === 0) {
+    hideSlashCommands();
+    return;
+  }
+
+  renderSlashCommands(filtered);
+  showSlashCommands();
+}
+
+function renderSlashCommands(commands) {
+  slashCommandSelectedIndex = 0;
+  slashCommandsEl.innerHTML = commands.map((cmd, i) => {
+    const sourceClass = `source-${cmd.source || 'builtin'}`;
+    const sourceLabel = cmd.source === 'global' ? 'global' : cmd.source === 'project' ? 'project' : '';
+    return `
+      <div class="slash-command${i === 0 ? ' selected' : ''}" data-command="${escapeAttr(cmd.name)}">
+        <div class="slash-command-header">
+          <span class="slash-command-name">${escapeHtml(cmd.name)}</span>
+          ${sourceLabel ? `<span class="slash-command-source ${sourceClass}">${sourceLabel}</span>` : ''}
+        </div>
+        <div class="slash-command-desc">${escapeHtml(cmd.desc)}</div>
+      </div>
+    `;
+  }).join('');
+
+  slashCommandsEl.querySelectorAll('.slash-command').forEach(el => {
+    el.addEventListener('click', () => {
+      insertSlashCommand(el.dataset.command);
+    });
+  });
+}
+
+function showSlashCommands() {
+  slashCommandsEl.classList.remove('hidden');
+}
+
+function hideSlashCommands() {
+  slashCommandsEl.classList.add('hidden');
+  slashCommandSelectedIndex = -1;
+}
+
+function handleSlashCommandKeydown(e) {
+  const items = slashCommandsEl.querySelectorAll('.slash-command');
+  if (items.length === 0) return false;
+  
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    slashCommandSelectedIndex = Math.min(slashCommandSelectedIndex + 1, items.length - 1);
+    updateSlashCommandSelection(items);
+    return true;
+  }
+  
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    slashCommandSelectedIndex = Math.max(slashCommandSelectedIndex - 1, 0);
+    updateSlashCommandSelection(items);
+    return true;
+  }
+  
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    const selected = items[slashCommandSelectedIndex];
+    if (selected) {
+      insertSlashCommand(selected.dataset.command);
+    }
+    return true;
+  }
+  
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    hideSlashCommands();
+    return true;
+  }
+  
+  return false;
+}
+
+function updateSlashCommandSelection(items) {
+  items.forEach((item, i) => {
+    item.classList.toggle('selected', i === slashCommandSelectedIndex);
+  });
+  items[slashCommandSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+}
+
+function insertSlashCommand(command) {
+  chatInput.value = command + ' ';
+  chatInput.focus();
+  hideSlashCommands();
+  chatInput.dispatchEvent(new Event('input'));
+}
+
+// Mode button functions
+function cycleMode() {
+  state.modeIndex = (state.modeIndex + 1) % MODES.length;
+  state.currentMode = MODES[state.modeIndex].name;
+  updateModeButton();
+}
+
+function updateModeButton() {
+  const mode = MODES[state.modeIndex];
+
+  // Remove all mode classes
+  modeBtn.classList.remove('mode-default', 'mode-plan', 'mode-bypass');
+
+  // Add current mode class
+  modeBtn.classList.add(`mode-${mode.name}`);
+
+  // Update title/tooltip
+  modeBtn.title = mode.label;
+}
+
+modeBtn.addEventListener('click', cycleMode);
 
 abortBtn.addEventListener('click', () => {
   if (state.currentSessionId && state.isStreaming) {
@@ -443,14 +677,43 @@ async function searchProjects(query) {
       return;
     }
     
-    projectList.innerHTML = projects.map(p => `
-      <div class="project-item" data-name="${escapeAttr(p.name)}" data-path="${escapeAttr(p.path)}">
-        <span class="session-count">${p.sessionCount}</span>
-        <span class="project-name">${escapeHtml(p.displayName)}</span>
-        <span class="project-path">${escapeHtml(p.path)}</span>
-      </div>
-    `).join('');
-    
+    // Sort favorites to top
+    const favorites = getFavorites();
+    projects.sort((a, b) => {
+      const aFav = favorites.includes(a.path);
+      const bFav = favorites.includes(b.path);
+      if (aFav && !bFav) return -1;
+      if (!aFav && bFav) return 1;
+      return 0;
+    });
+
+    projectList.innerHTML = projects.map(p => {
+      const favored = isFavorite(p.path);
+      return `
+        <div class="project-item" data-name="${escapeAttr(p.name)}" data-path="${escapeAttr(p.path)}">
+          <button class="favorite-btn${favored ? ' active' : ''}" data-path="${escapeAttr(p.path)}" aria-label="${favored ? 'Unfavorite' : 'Favorite'}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="${favored ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+            </svg>
+          </button>
+          <span class="session-count">${p.sessionCount}</span>
+          <span class="project-name">${escapeHtml(p.displayName)}</span>
+          <span class="project-path">${escapeHtml(p.path)}</span>
+        </div>
+      `;
+    }).join('');
+
+    // Add click handlers for favorite buttons
+    projectList.querySelectorAll('.favorite-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const path = btn.dataset.path;
+        toggleFavorite(path);
+        // Re-render to update order and button state
+        searchProjects(projectSearch.value);
+      });
+    });
+
     projectList.querySelectorAll('.project-item').forEach(el => {
       el.addEventListener('click', () => {
         selectProject(el.dataset.name, el.dataset.path, el.querySelector('.project-name').textContent);
@@ -467,12 +730,15 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
   state.currentSessionId = null;
   projectNameEl.textContent = displayName;
   if (!skipHashUpdate) updateHash(name);
-  
+
+  // Load custom commands for this project
+  loadCustomCommands(path);
+
   projectList.classList.add('hidden');
   sessionList.classList.remove('hidden');
   sessionsContainer.innerHTML = '<div class="loading">Loading sessions</div>';
   newSessionBtn.classList.remove('hidden');
-  
+
   try {
     const sessions = await api(`/api/projects/${encodeURIComponent(name)}/sessions`);
     
@@ -569,6 +835,7 @@ backToProjectsBtn.addEventListener('click', () => {
 function enableChat() {
   chatInput.disabled = false;
   sendBtn.disabled = false;
+  modeBtn.disabled = false;
   chatInput.focus();
 }
 

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
 import { handleChat, handleAbort } from './claude.js';
+import { getAllCommands } from './commands.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +29,18 @@ app.use('/api/projects', authenticateToken, projectRoutes);
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Commands API - get global and project slash commands
+app.get('/api/commands', authenticateToken, async (req, res) => {
+  try {
+    const projectPath = req.query.projectPath || null;
+    const commands = await getAllCommands(projectPath);
+    res.json(commands);
+  } catch (err) {
+    console.error('[Commands] Error fetching commands:', err);
+    res.status(500).json({ error: 'Failed to fetch commands' });
+  }
 });
 
 // SPA fallback - serve index.html for all non-API routes

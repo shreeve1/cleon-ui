@@ -70,6 +70,22 @@
           </div>
         </div>
         <form id="chat-form">
+          <div id="slash-commands" class="hidden"></div>
+          <button type="button" id="mode-btn" class="mode-bypass" title="Bypass Permissions" disabled>
+            <!-- Default: Chat bubble icon -->
+            <svg class="mode-icon mode-icon-default" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <!-- Plan: Clipboard icon -->
+            <svg class="mode-icon mode-icon-plan" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+              <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+            </svg>
+            <!-- Bypass: Lightning bolt icon -->
+            <svg class="mode-icon mode-icon-bypass" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+          </button>
           <textarea id="chat-input" placeholder="Message Claude..." rows="1" disabled></textarea>
           <button type="submit" id="send-btn" disabled>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
