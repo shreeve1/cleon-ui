@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Claude Lite</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="auth-screen" class="screen">
+      <div class="auth-container">
+        <h1>Claude Lite</h1>
+        <form id="auth-form">
+          <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+          <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+          <button type="submit" id="auth-btn">Log In</button>
+        </form>
+        <p id="auth-error" class="error hidden"></p>
+      </div>
+    </div>
+
+    <div id="main-screen" class="screen hidden">
+      <header id="header">
+        <button id="menu-btn" class="icon-btn" aria-label="Menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+        <div id="session-info">
+          <span id="project-name">Select a project</span>
+          <span id="token-usage" class="hidden"></span>
+        </div>
+        <button id="abort-btn" class="icon-btn hidden" aria-label="Stop">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+          </svg>
+        </button>
+      </header>
+
+      <aside id="sidebar" class="hidden">
+        <div class="sidebar-header">
+          <input type="text" id="project-search" placeholder="Search projects by path...">
+          <button id="close-sidebar" class="icon-btn" aria-label="Close">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div id="project-list"></div>
+        <div id="session-list" class="hidden">
+          <button id="back-to-projects" class="back-btn">&larr; Back to projects</button>
+          <div id="sessions-container"></div>
+        </div>
+        <button id="new-session-btn" class="hidden">+ New Session</button>
+      </aside>
+      <div id="sidebar-overlay" class="hidden"></div>
+
+      <main id="chat">
+        <div id="messages">
+          <div class="welcome-message">
+            <h2>Welcome to Claude Lite</h2>
+            <p>Tap the menu to search for a project and start chatting.</p>
+          </div>
+        </div>
+        <form id="chat-form">
+          <textarea id="chat-input" placeholder="Message Claude..." rows="1" disabled></textarea>
+          <button type="submit" id="send-btn" disabled>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+            </svg>
+          </button>
+        </form>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

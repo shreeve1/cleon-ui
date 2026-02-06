@@ -1,24 +1,19 @@
 {
-  "name": "multi-agent-ui",
+  "name": "claude-lite",
   "version": "1.0.0",
-  "private": true,
-  "workspaces": [
-    "backend",
-    "frontend"
-  ],
+  "description": "Lightweight mobile-first web UI for Claude Code",
+  "type": "module",
+  "main": "server/index.js",
   "scripts": {
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "dev:backend": "cd backend && npm run dev",
-    "dev:frontend": "cd frontend && npm run dev",
-    "build": "npm run build:backend && npm run build:frontend",
-    "build:backend": "cd backend && npm run build",
-    "build:frontend": "cd frontend && npm run build"
-  },
-  "devDependencies": {
-    "concurrently": "^8.2.2"
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
   },
   "dependencies": {
-    "@types/uuid": "^10.0.0",
-    "uuid": "^13.0.0"
+    "@anthropic-ai/claude-agent-sdk": "^0.1.29",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.2.0",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "ws": "^8.14.2"
   }
 }
