@@ -290,6 +290,14 @@ body::after {
   box-shadow: var(--glow-red);
 }
 
+/* Header Actions Container */
+#header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 /* Sidebar */
 #sidebar {
   position: fixed;
@@ -1004,25 +1012,24 @@ body::after {
   font-size: 13px;
 }
 
-/* Attach Button */
+/* Attach Button (Header) */
 #attach-btn {
-  width: 50px;
-  height: 50px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  transition: background 0.2s, color 0.2s, box-shadow 0.2s;
   flex-shrink: 0;
   color: var(--text-dim);
 }
 
 #attach-btn:hover:not(:disabled) {
   background: var(--bg-hover);
-  border-color: var(--neon-cyan);
   color: var(--neon-cyan);
   box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
 }
@@ -1036,20 +1043,21 @@ body::after {
   display: none;
 }
 
-/* Mode Toggle Button */
+/* Mode Toggle Button (Header) */
 #mode-btn {
-  width: 50px;
-  height: 50px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  transition: background 0.2s, color 0.2s, box-shadow 0.2s;
   flex-shrink: 0;
   position: relative;
+  color: var(--text);
 }
 
 #mode-btn:hover:not(:disabled) {
@@ -1157,6 +1165,7 @@ body::after {
   cursor: not-allowed;
 }
 
+/* Send Button (Chat Form) */
 #send-btn {
   width: 50px;
   height: 50px;
@@ -1233,11 +1242,11 @@ body::after {
   .message {
     max-width: 75%;
   }
-  
+
   #chat-form {
     padding: 16px 24px;
   }
-  
+
   #messages {
     padding: 24px;
   }
