@@ -8,6 +8,36 @@ const state = {
   pendingText: ''
 };
 
+function parseHash() {
+  const hash = window.location.hash.slice(1);
+  if (!hash) return null;
+  
+  const projectMatch = hash.match(/^\/project\/([^/]+)(?:\/session\/([^/]+))?$/);
+  if (projectMatch) {
+    return {
+      projectName: decodeURIComponent(projectMatch[1]),
+      sessionId: projectMatch[2] ? decodeURIComponent(projectMatch[2]) : null
+    };
+  }
+  return null;
+}
+
+function updateHash(projectName, sessionId = null) {
+  let hash = '';
+  if (projectName) {
+    hash = `/project/${encodeURIComponent(projectName)}`;
+    if (sessionId) {
+      hash += `/session/${encodeURIComponent(sessionId)}`;
+    }
+  }
+  const newUrl = hash ? '#' + hash : window.location.pathname;
+  if (window.location.hash === '' && hash) {
+    window.history.replaceState(null, '', newUrl);
+  } else {
+    window.history.pushState(null, '', newUrl);
+  }
+}
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
@@ -58,6 +88,28 @@ function showMain() {
   authScreen.classList.add('hidden');
   mainScreen.classList.remove('hidden');
   connectWebSocket();
+  restoreFromHash();
+}
+
+async function restoreFromHash() {
+  const route = parseHash();
+  if (!route) return;
+  
+  try {
+    const { path: projectPath } = await api(`/api/projects/${encodeURIComponent(route.projectName)}/path`);
+    const displayName = projectPath.split('/').pop();
+    
+    await selectProject(route.projectName, projectPath, displayName, true);
+    closeSidebar();
+    
+    if (route.sessionId) {
+      await resumeSession(route.sessionId, true);
+    } else {
+      enableChat();
+    }
+  } catch (err) {
+    console.error('Failed to restore from hash:', err);
+  }
 }
 
 authForm.addEventListener('submit', async (e) => {
@@ -410,9 +462,11 @@ async function searchProjects(query) {
   }
 }
 
-async function selectProject(name, path, displayName) {
+async function selectProject(name, path, displayName, skipHashUpdate = false) {
   state.currentProject = { name, path, displayName };
+  state.currentSessionId = null;
   projectNameEl.textContent = displayName;
+  if (!skipHashUpdate) updateHash(name);
   
   projectList.classList.add('hidden');
   sessionList.classList.remove('hidden');
@@ -441,8 +495,9 @@ async function selectProject(name, path, displayName) {
   }
 }
 
-async function resumeSession(sessionId) {
+async function resumeSession(sessionId, skipHashUpdate = false) {
   state.currentSessionId = sessionId;
+  if (!skipHashUpdate) updateHash(state.currentProject.name, sessionId);
   clearMessages();
   messagesEl.innerHTML = '<div class="loading">Loading history</div>';
   closeSidebar();
@@ -498,6 +553,7 @@ function getToolSummaryFromInput(tool, input) {
 
 newSessionBtn.addEventListener('click', () => {
   state.currentSessionId = null;
+  updateHash(state.currentProject.name);
   clearMessages();
   enableChat();
   closeSidebar();
@@ -606,5 +662,11 @@ async function api(url, body = null) {
   
   return data;
 }
+
+window.addEventListener('hashchange', () => {
+  if (state.token) {
+    restoreFromHash();
+  }
+});
 
 init();
