@@ -8,7 +8,9 @@ const state = {
   pendingText: '',
   customCommands: [],
   modeIndex: 2,
-  currentMode: 'bypass'
+  currentMode: 'bypass',
+  pendingQuestion: null,
+  attachments: [] // Array of { id, type, name, data, preview, mediaType }
 };
 
 // Mode configuration
@@ -100,6 +102,11 @@ const abortBtn = $('#abort-btn');
 const projectNameEl = $('#project-name');
 const tokenUsageEl = $('#token-usage');
 const slashCommandsEl = $('#slash-commands');
+const fileMentionsEl = $('#file-mentions');
+const attachmentPreviewEl = $('#attachment-preview');
+const dropZoneOverlay = $('#drop-zone-overlay');
+const fileInput = $('#file-input');
+const attachBtn = $('#attach-btn');
 
 // Built-in commands (always available)
 const BUILTIN_COMMANDS = [
@@ -149,6 +156,12 @@ async function loadCustomCommands(projectPath = null) {
 }
 
 let slashCommandSelectedIndex = -1;
+
+// File mention state
+let fileMentionSelectedIndex = 0;
+let fileMentionQuery = '';
+let fileMentionStartPos = -1;
+let fileMentionDebounceTimer = null;
 
 async function init() {
   const status = await api('/api/auth/status').catch(() => ({ needsSetup: true }));
@@ -300,6 +313,17 @@ function handleClaudeMessage(data) {
     return;
   }
   
+  if (data.type === 'question') {
+    flushPendingText();
+    state.pendingQuestion = {
+      id: data.id,
+      questions: data.questions,
+      selectedAnswers: {}
+    };
+    renderQuestion(data);
+    return;
+  }
+  
   if (data.type === 'tool_use') {
     flushPendingText();
     appendToolMessage(data.tool, data.summary, data.id, 'running');
@@ -340,12 +364,32 @@ function finishStreaming() {
   chatInput.disabled = false;
   sendBtn.disabled = false;
   modeBtn.disabled = false;
+  attachBtn.disabled = false;
 
   flushPendingText();
 
   const streamingEl = messagesEl.querySelector('.message.streaming');
   if (streamingEl) {
     streamingEl.classList.remove('streaming');
+  }
+  
+  if (state.pendingQuestion) {
+    const questionBlock = messagesEl.querySelector('.message.question-block:not(.submitted)');
+    if (questionBlock) {
+      questionBlock.classList.add('cancelled');
+      const submitBtn = questionBlock.querySelector('.question-submit');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Cancelled';
+      }
+      questionBlock.querySelectorAll('.question-option').forEach(opt => {
+        opt.style.pointerEvents = 'none';
+      });
+      questionBlock.querySelectorAll('.question-custom-input').forEach(input => {
+        input.disabled = true;
+      });
+    }
+    state.pendingQuestion = null;
   }
 }
 
@@ -412,6 +456,168 @@ function updateToolResult(id, success, output) {
   scrollToBottom();
 }
 
+function renderQuestion(data) {
+  removeWelcome();
+  
+  const div = document.createElement('div');
+  div.className = 'message question-block';
+  div.dataset.questionId = data.id;
+  
+  let html = '';
+  
+  data.questions.forEach((q, qIndex) => {
+    const isMultiple = q.multiSelect || q.multiple || false;
+    
+    html += `
+      <div class="question-group" data-question-index="${qIndex}" data-multiple="${isMultiple}">
+        <div class="question-header">${escapeHtml(q.header || '')}</div>
+        <div class="question-text">${escapeHtml(q.question)}</div>
+        <div class="question-options">
+    `;
+    
+    if (q.options && q.options.length > 0) {
+      q.options.forEach(opt => {
+        html += `
+          <div class="question-option" data-label="${escapeAttr(opt.label)}" data-qindex="${qIndex}">
+            <span class="option-label">${escapeHtml(opt.label)}</span>
+            ${opt.description ? `<span class="option-desc">${escapeHtml(opt.description)}</span>` : ''}
+          </div>
+        `;
+      });
+    }
+    
+    html += `
+        </div>
+        <div class="question-custom-container">
+          <input type="text" class="question-custom-input" data-qindex="${qIndex}" placeholder="Type your own answer...">
+        </div>
+      </div>
+    `;
+  });
+  
+  html += `
+    <button class="question-submit" disabled>Submit Answer</button>
+  `;
+  
+  div.innerHTML = html;
+  messagesEl.appendChild(div);
+  
+  div.querySelectorAll('.question-option').forEach(opt => {
+    opt.addEventListener('click', () => handleOptionSelect(opt));
+  });
+  
+  div.querySelectorAll('.question-custom-input').forEach(input => {
+    input.addEventListener('input', () => handleCustomInputChange(input));
+  });
+  
+  div.querySelector('.question-submit').addEventListener('click', submitQuestionResponse);
+  
+  scrollToBottom();
+}
+
+function handleOptionSelect(optionEl) {
+  const qIndex = parseInt(optionEl.dataset.qindex);
+  const label = optionEl.dataset.label;
+  const questionGroup = optionEl.closest('.question-group');
+  const isMultiple = questionGroup.dataset.multiple === 'true';
+  
+  if (!state.pendingQuestion) return;
+  
+  if (!state.pendingQuestion.selectedAnswers[qIndex]) {
+    state.pendingQuestion.selectedAnswers[qIndex] = [];
+  }
+  
+  const answers = state.pendingQuestion.selectedAnswers[qIndex];
+  const existingIndex = answers.indexOf(label);
+  
+  if (isMultiple) {
+    if (existingIndex >= 0) {
+      answers.splice(existingIndex, 1);
+      optionEl.classList.remove('selected');
+    } else {
+      answers.push(label);
+      optionEl.classList.add('selected');
+    }
+  } else {
+    questionGroup.querySelectorAll('.question-option').forEach(opt => {
+      opt.classList.remove('selected');
+    });
+    state.pendingQuestion.selectedAnswers[qIndex] = [label];
+    optionEl.classList.add('selected');
+  }
+  
+  const customInput = questionGroup.querySelector('.question-custom-input');
+  if (customInput) {
+    customInput.value = '';
+  }
+  
+  updateSubmitButtonState();
+}
+
+function handleCustomInputChange(inputEl) {
+  const qIndex = parseInt(inputEl.dataset.qindex);
+  const value = inputEl.value.trim();
+  const questionGroup = inputEl.closest('.question-group');
+  
+  if (!state.pendingQuestion) return;
+  
+  questionGroup.querySelectorAll('.question-option').forEach(opt => {
+    opt.classList.remove('selected');
+  });
+  
+  if (value) {
+    state.pendingQuestion.selectedAnswers[qIndex] = [value];
+  } else {
+    delete state.pendingQuestion.selectedAnswers[qIndex];
+  }
+  
+  updateSubmitButtonState();
+}
+
+function updateSubmitButtonState() {
+  const questionBlock = messagesEl.querySelector('.message.question-block');
+  if (!questionBlock || !state.pendingQuestion) return;
+  
+  const submitBtn = questionBlock.querySelector('.question-submit');
+  const totalQuestions = state.pendingQuestion.questions.length;
+  const answeredQuestions = Object.keys(state.pendingQuestion.selectedAnswers).filter(
+    key => state.pendingQuestion.selectedAnswers[key]?.length > 0
+  ).length;
+  
+  submitBtn.disabled = answeredQuestions < totalQuestions;
+}
+
+function submitQuestionResponse() {
+  if (!state.pendingQuestion || !state.currentSessionId) return;
+  
+  const answers = state.pendingQuestion.selectedAnswers;
+  
+  state.ws.send(JSON.stringify({
+    type: 'question-response',
+    sessionId: state.currentSessionId,
+    toolUseId: state.pendingQuestion.id,
+    answers: answers
+  }));
+  
+  const questionBlock = messagesEl.querySelector('.message.question-block');
+  if (questionBlock) {
+    questionBlock.classList.add('submitted');
+    const submitBtn = questionBlock.querySelector('.question-submit');
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitted';
+    }
+    questionBlock.querySelectorAll('.question-option').forEach(opt => {
+      opt.style.pointerEvents = 'none';
+    });
+    questionBlock.querySelectorAll('.question-custom-input').forEach(input => {
+      input.disabled = true;
+    });
+  }
+  
+  state.pendingQuestion = null;
+}
+
 function removeWelcome() {
   const welcome = messagesEl.querySelector('.welcome-message');
   if (welcome) welcome.remove();
@@ -449,16 +655,35 @@ chatForm.addEventListener('submit', (e) => {
 function sendMessage(content) {
   const mode = MODES[state.modeIndex];
 
-  state.ws.send(JSON.stringify({
+  const message = {
     type: 'chat',
     content: content,
     mode: mode.name,
     projectPath: state.currentProject.path,
     sessionId: state.currentSessionId,
     isNewSession: !state.currentSessionId
-  }));
+  };
 
-  appendMessage('user', content);
+  // Add attachments if present
+  if (state.attachments.length > 0) {
+    message.attachments = state.attachments.map(att => ({
+      type: att.type,
+      name: att.name,
+      data: att.data,
+      mediaType: att.mediaType
+    }));
+  }
+
+  state.ws.send(JSON.stringify(message));
+
+  // Show attachments in user message display
+  const displayContent = formatUserMessageWithAttachments(content, state.attachments);
+  appendMessage('user', displayContent);
+
+  // Clear attachments after sending
+  state.attachments = [];
+  renderAttachmentPreview();
+
   chatInput.value = '';
   chatInput.style.height = 'auto';
 
@@ -467,6 +692,7 @@ function sendMessage(content) {
   chatInput.disabled = true;
   sendBtn.disabled = true;
   modeBtn.disabled = true;
+  attachBtn.disabled = true;
 }
 
 chatInput.addEventListener('input', () => {
@@ -484,6 +710,9 @@ chatInput.addEventListener('keydown', (e) => {
   if (slashCommandsEl && !slashCommandsEl.classList.contains('hidden')) {
     if (handleSlashCommandKeydown(e)) return;
   }
+  if (fileMentionsEl && !fileMentionsEl.classList.contains('hidden')) {
+    if (handleFileMentionKeydown(e)) return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     chatForm.dispatchEvent(new Event('submit'));
@@ -491,9 +720,27 @@ chatInput.addEventListener('keydown', (e) => {
 });
 
 chatInput.addEventListener('input', handleSlashCommandInput);
+chatInput.addEventListener('input', handleFileMentionInput);
 chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashCommands, 150);
+  setTimeout(hideFileMentions, 150);
 });
+
+// Mobile keyboard handling - scroll input into view when focused
+chatInput.addEventListener('focus', () => {
+  setTimeout(() => {
+    chatInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 300);
+});
+
+// Visual Viewport API for better mobile keyboard handling
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    if (document.activeElement === chatInput) {
+      chatInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+}
 
 function handleSlashCommandInput() {
   const value = chatInput.value;
@@ -598,6 +845,193 @@ function insertSlashCommand(command) {
   chatInput.value = command + ' ';
   chatInput.focus();
   hideSlashCommands();
+  chatInput.dispatchEvent(new Event('input'));
+}
+
+// File Mention Functions
+function handleFileMentionInput() {
+  const value = chatInput.value;
+  const cursorPos = chatInput.selectionStart;
+  const textBeforeCursor = value.slice(0, cursorPos);
+  const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+
+  // No @ found or @ is at the very end with nothing after it
+  if (lastAtIndex === -1) {
+    hideFileMentions();
+    return;
+  }
+
+  const textAfterAt = textBeforeCursor.slice(lastAtIndex + 1);
+
+  // Check if there's whitespace after @ (which would mean @ mention is complete)
+  if (textAfterAt.includes(' ')) {
+    hideFileMentions();
+    return;
+  }
+
+  // Check if we're at the start or after whitespace
+  if (lastAtIndex > 0 && textBeforeCursor[lastAtIndex - 1] !== ' ' && textBeforeCursor[lastAtIndex - 1] !== '\n') {
+    // @ is in the middle of a word, don't trigger
+    hideFileMentions();
+    return;
+  }
+
+  fileMentionQuery = textAfterAt;
+  fileMentionStartPos = lastAtIndex;
+
+  // Debounce the API call
+  clearTimeout(fileMentionDebounceTimer);
+  fileMentionDebounceTimer = setTimeout(() => {
+    fetchFileMentions(fileMentionQuery);
+  }, 300);
+}
+
+async function fetchFileMentions(query) {
+  // Check if project is selected
+  if (!state.currentProject) {
+    renderFileMentions([], 'no-project');
+    showFileMentions();
+    return;
+  }
+
+  try {
+    const { files } = await api(`/api/projects/${encodeURIComponent(state.currentProject.name)}/files/search?q=${encodeURIComponent(query)}`);
+    renderFileMentions(files);
+    showFileMentions();
+  } catch (err) {
+    console.error('[FileMention] Failed to fetch files:', err);
+    hideFileMentions();
+  }
+}
+
+function renderFileMentions(files, state = 'normal') {
+  fileMentionSelectedIndex = 0;
+
+  if (state === 'no-project') {
+    fileMentionsEl.innerHTML = '<div class="file-mention-no-project">Select a project to search files</div>';
+    return;
+  }
+
+  if (files.length === 0) {
+    fileMentionsEl.innerHTML = '<div class="file-mention-empty">No files found</div>';
+    return;
+  }
+
+  fileMentionsEl.innerHTML = files.map((file, i) => {
+    const icon = getFileIcon(file);
+    return `
+      <div class="file-mention-item${i === 0 ? ' selected' : ''}" data-file="${escapeAttr(file)}">
+        <span class="file-icon">${icon}</span>
+        <span class="file-path">${escapeHtml(file)}</span>
+      </div>
+    `;
+  }).join('');
+
+  // Add click handlers
+  fileMentionsEl.querySelectorAll('.file-mention-item').forEach(el => {
+    el.addEventListener('click', () => {
+      selectFileMention(el.dataset.file);
+    });
+  });
+}
+
+function getFileIcon(filePath) {
+  const ext = filePath.split('.').pop().toLowerCase();
+  const iconMap = {
+    'js': '📜',
+    'ts': '📘',
+    'jsx': '⚛️',
+    'tsx': '⚛️',
+    'py': '🐍',
+    'json': '📋',
+    'md': '📝',
+    'css': '🎨',
+    'scss': '🎨',
+    'html': '🌐',
+    'svg': '🖼️',
+    'png': '🖼️',
+    'jpg': '🖼️',
+    'jpeg': '🖼️',
+    'gif': '🖼️',
+    'yml': '⚙️',
+    'yaml': '⚙️',
+    'toml': '⚙️',
+    'sh': '🔧',
+    'bash': '🔧',
+    'zsh': '🔧'
+  };
+  return iconMap[ext] || '📄';
+}
+
+function showFileMentions() {
+  fileMentionsEl.classList.remove('hidden');
+}
+
+function hideFileMentions() {
+  fileMentionsEl.classList.add('hidden');
+  fileMentionSelectedIndex = 0;
+  fileMentionQuery = '';
+  fileMentionStartPos = -1;
+  clearTimeout(fileMentionDebounceTimer);
+}
+
+function handleFileMentionKeydown(e) {
+  const items = fileMentionsEl.querySelectorAll('.file-mention-item');
+  if (items.length === 0) return false;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    fileMentionSelectedIndex = Math.min(fileMentionSelectedIndex + 1, items.length - 1);
+    updateFileMentionSelection(items);
+    return true;
+  }
+
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    fileMentionSelectedIndex = Math.max(fileMentionSelectedIndex - 1, 0);
+    updateFileMentionSelection(items);
+    return true;
+  }
+
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    const selected = items[fileMentionSelectedIndex];
+    if (selected) {
+      selectFileMention(selected.dataset.file);
+    }
+    return true;
+  }
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    hideFileMentions();
+    return true;
+  }
+
+  return false;
+}
+
+function updateFileMentionSelection(items) {
+  items.forEach((item, i) => {
+    item.classList.toggle('selected', i === fileMentionSelectedIndex);
+  });
+  items[fileMentionSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+}
+
+function selectFileMention(filePath) {
+  const value = chatInput.value;
+  const before = value.slice(0, fileMentionStartPos);
+  const after = value.slice(chatInput.selectionStart);
+  const formatted = `@"${filePath}"`;
+
+  chatInput.value = before + formatted + after;
+  chatInput.focus();
+
+  // Set cursor position after the inserted text
+  const newCursorPos = fileMentionStartPos + formatted.length;
+  chatInput.setSelectionRange(newCursorPos, newCursorPos);
+
+  hideFileMentions();
   chatInput.dispatchEvent(new Event('input'));
 }
 
@@ -836,6 +1270,7 @@ function enableChat() {
   chatInput.disabled = false;
   sendBtn.disabled = false;
   modeBtn.disabled = false;
+  attachBtn.disabled = false;
   chatInput.focus();
 }
 
@@ -933,6 +1368,247 @@ async function api(url, body = null) {
 window.addEventListener('hashchange', () => {
   if (state.token) {
     restoreFromHash();
+  }
+});
+
+// ============================================
+// File Paste/Drop Attachment Handling
+// ============================================
+
+// Allowed file types for attachments
+function isAllowedFileType(file) {
+  const allowedTypes = [
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'text/plain', 'text/markdown',
+    'application/pdf'
+  ];
+  const allowedExtensions = ['.txt', '.md', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp'];
+
+  if (allowedTypes.includes(file.type)) return true;
+
+  const ext = '.' + file.name.split('.').pop().toLowerCase();
+  return allowedExtensions.includes(ext);
+}
+
+// Determine attachment type from file
+function getAttachmentType(file) {
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) return 'pdf';
+  if (file.name.endsWith('.md')) return 'markdown';
+  return 'text';
+}
+
+// Convert file to base64 data URL
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Truncate text for preview
+function truncateText(text, maxLength) {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength) + '...';
+}
+
+// Upload file to server (for PDFs that need server-side processing)
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await fetch('/api/upload', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${state.token}`
+    },
+    body: formData
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'File upload failed');
+  }
+
+  return res.json();
+}
+
+// Process and add a file as an attachment
+async function processAndAddAttachment(file) {
+  // Check max attachments
+  if (state.attachments.length >= 5) {
+    alert('Maximum 5 attachments allowed');
+    return;
+  }
+
+  const attachment = {
+    id: Date.now() + Math.random().toString(36).substr(2, 9),
+    name: file.name,
+    type: getAttachmentType(file),
+    size: file.size
+  };
+
+  try {
+    if (attachment.type === 'image') {
+      // Convert image to base64 for preview and sending
+      attachment.data = await fileToBase64(file);
+      attachment.preview = attachment.data;
+      attachment.mediaType = file.type;
+    } else if (attachment.type === 'text' || attachment.type === 'markdown') {
+      // Read text content directly
+      attachment.data = await file.text();
+      attachment.preview = truncateText(attachment.data, 100);
+    } else if (attachment.type === 'pdf') {
+      // Upload PDF and get extracted text
+      const result = await uploadFile(file);
+      attachment.data = result.content;
+      attachment.preview = truncateText(result.content, 100);
+    }
+
+    state.attachments.push(attachment);
+    renderAttachmentPreview();
+    chatInput.focus();
+  } catch (err) {
+    console.error('[Attachment] Error processing file:', err);
+    alert(`Failed to process file: ${err.message}`);
+  }
+}
+
+// Render attachment preview area
+function renderAttachmentPreview() {
+  if (state.attachments.length === 0) {
+    attachmentPreviewEl.classList.add('hidden');
+    attachmentPreviewEl.innerHTML = '';
+    return;
+  }
+
+  attachmentPreviewEl.classList.remove('hidden');
+  attachmentPreviewEl.innerHTML = state.attachments.map(att => {
+    if (att.type === 'image') {
+      return `
+        <div class="attachment-item image" data-id="${att.id}">
+          <img src="${att.preview}" alt="${escapeAttr(att.name)}">
+          <button class="attachment-remove" onclick="removeAttachment('${att.id}')">&times;</button>
+        </div>
+      `;
+    }
+
+    const icon = getFileIcon(att.name);
+    return `
+      <div class="attachment-item" data-id="${att.id}">
+        <span class="attachment-icon">${icon}</span>
+        <span class="attachment-name">${escapeHtml(att.name)}</span>
+        <button class="attachment-remove" onclick="removeAttachment('${att.id}')">&times;</button>
+      </div>
+    `;
+  }).join('');
+}
+
+// Remove attachment by ID (global function for onclick)
+window.removeAttachment = function(id) {
+  state.attachments = state.attachments.filter(att => att.id !== id);
+  renderAttachmentPreview();
+};
+
+// Format user message display with attachments
+function formatUserMessageWithAttachments(content, attachments) {
+  if (!attachments || attachments.length === 0) return content;
+
+  const attachmentText = attachments.map(att => {
+    if (att.type === 'image') {
+      return `[Image: ${att.name}]`;
+    }
+    return `[${att.type.toUpperCase()}: ${att.name}]`;
+  }).join(' ');
+
+  return content ? `${content}\n\n${attachmentText}` : attachmentText;
+}
+
+// Paste event handler
+document.addEventListener('paste', async (e) => {
+  // Only handle if chat is enabled and a project is selected
+  if (!state.currentProject || chatInput.disabled) return;
+
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file && isAllowedFileType(file)) {
+        files.push(file);
+      }
+    }
+  }
+
+  if (files.length > 0) {
+    e.preventDefault();
+    for (const file of files) {
+      await processAndAddAttachment(file);
+    }
+  }
+});
+
+// Attach button click handler (for mobile file selection)
+attachBtn.addEventListener('click', () => {
+  fileInput.click();
+});
+
+// File input change handler
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  for (const file of files) {
+    if (isAllowedFileType(file)) {
+      await processAndAddAttachment(file);
+    }
+  }
+  fileInput.value = ''; // Reset for re-selection
+});
+
+// Drag and drop handlers
+let dragCounter = 0;
+
+document.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  if (!state.currentProject || chatInput.disabled) return;
+
+  // Check if dragging files
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+
+  dragCounter++;
+  if (dragCounter === 1) {
+    dropZoneOverlay.classList.remove('hidden');
+  }
+});
+
+document.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter === 0) {
+    dropZoneOverlay.classList.add('hidden');
+  }
+});
+
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+});
+
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dragCounter = 0;
+  dropZoneOverlay.classList.add('hidden');
+
+  if (!state.currentProject || chatInput.disabled) return;
+
+  const files = Array.from(e.dataTransfer?.files || []);
+  for (const file of files) {
+    if (isAllowedFileType(file)) {
+      await processAndAddAttachment(file);
+    }
   }
 });
 

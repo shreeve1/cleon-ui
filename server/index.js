@@ -5,11 +5,13 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import multer from 'multer';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
-import { handleChat, handleAbort } from './claude.js';
+import { handleChat, handleAbort, handleQuestionResponse } from './claude.js';
 import { getAllCommands } from './commands.js';
+import { processUpload, validateFile } from './uploads.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +20,12 @@ const app = express();
 const server = http.createServer(app);
 
 app.use(express.json());
+
+// Configure multer for file uploads (memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
 
 // Static files (frontend)
 app.use(express.static(path.join(__dirname, '../public')));
@@ -40,6 +48,23 @@ app.get('/api/commands', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('[Commands] Error fetching commands:', err);
     res.status(500).json({ error: 'Failed to fetch commands' });
+  }
+});
+
+// File upload API - for PDF text extraction
+app.post('/api/upload', authenticateToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    validateFile(req.file);
+    const result = await processUpload(req.file);
+
+    res.json(result);
+  } catch (err) {
+    console.error('[Upload] Error:', err);
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -95,6 +120,19 @@ wss.on('connection', (ws, req) => {
             type: 'abort-result',
             sessionId: msg.sessionId,
             success
+          }));
+          break;
+
+        case 'question-response':
+          const responseSuccess = await handleQuestionResponse(
+            msg.sessionId,
+            msg.toolUseId,
+            msg.answers
+          );
+          ws.send(JSON.stringify({
+            type: 'question-response-result',
+            sessionId: msg.sessionId,
+            success: responseSuccess
           }));
           break;
 
