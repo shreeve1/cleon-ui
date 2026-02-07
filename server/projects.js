@@ -2,9 +2,17 @@ import express from 'express';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { glob } from 'glob';
 
 const router = express.Router();
 const CLAUDE_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+
+// Constants
+const MAX_PROJECTS = 30;
+const MAX_SESSIONS = 30;
+const MAX_FILE_RESULTS = 20;
+const SESSION_PREVIEW_LENGTH = 120;
+const FILE_SEARCH_LIMIT = 50;
 
 /**
  * GET /api/projects/search?q=/path/to/project
@@ -51,7 +59,7 @@ router.get('/search', async (req, res) => {
     // Sort by path
     projects.sort((a, b) => a.path.localeCompare(b.path));
 
-    res.json(projects.slice(0, 30)); // Limit results
+    res.json(projects.slice(0, MAX_PROJECTS));
 
   } catch (err) {
     console.error('[Projects] Search error:', err);
@@ -99,7 +107,7 @@ router.get('/:name/sessions', async (req, res) => {
     // Sort by most recent first
     sessions.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
 
-    res.json(sessions.slice(0, 30));
+    res.json(sessions.slice(0, MAX_SESSIONS));
 
   } catch (err) {
     console.error('[Projects] Sessions error:', err);
@@ -207,13 +215,13 @@ async function getSessionPreview(filePath) {
           }
 
           // Skip system/internal messages
-          if (typeof text === 'string' && 
-              text.length > 0 && 
+          if (typeof text === 'string' &&
+              text.length > 0 &&
               !text.startsWith('<') &&
               !text.startsWith('{') &&
               !text.includes('CRITICAL:')) {
-            const preview = text.slice(0, 120);
-            return preview + (text.length > 120 ? '...' : '');
+            const preview = text.slice(0, SESSION_PREVIEW_LENGTH);
+            return preview + (text.length > SESSION_PREVIEW_LENGTH ? '...' : '');
           }
         }
       } catch { /* skip malformed */ }
@@ -291,5 +299,101 @@ function parseMessageEntry(entry) {
   
   return null;
 }
+
+/**
+ * GET /api/projects/:name/files/search?q=query
+ * Search files within a project using glob patterns
+ */
+router.get('/:name/files/search', async (req, res) => {
+  const { name } = req.params;
+  const query = (req.query.q || '').trim();
+
+  try {
+    // Get the actual project path
+    const projectDir = path.join(CLAUDE_PROJECTS, name);
+    const actualPath = await extractProjectPath(projectDir, name);
+
+    // Check if project path exists and is absolute
+    if (!actualPath || !path.isAbsolute(actualPath)) {
+      return res.status(400).json({ error: 'Invalid project path' });
+    }
+
+    // Resolve and normalize the path to prevent traversal attacks
+    const resolvedPath = path.resolve(actualPath);
+
+    // Verify the resolved path doesn't escape to sensitive directories
+    const homeDir = os.homedir();
+    const sensitivePatterns = ['/etc', '/var', '/usr', '/bin', '/sbin', '/root'];
+    if (sensitivePatterns.some(p => resolvedPath.startsWith(p))) {
+      return res.status(403).json({ error: 'Access to this path is not allowed' });
+    }
+
+    // Check if directory exists
+    try {
+      const stats = await fs.stat(resolvedPath);
+      if (!stats.isDirectory()) {
+        return res.status(400).json({ error: 'Project path is not a directory' });
+      }
+    } catch (err) {
+      return res.status(404).json({ error: 'Project directory not found' });
+    }
+
+    // Sanitize query to prevent path traversal in search
+    const sanitizedQuery = query.replace(/\.\./g, '').replace(/[<>:"|?*]/g, '');
+
+    // Build glob pattern based on query
+    let pattern;
+    if (sanitizedQuery.includes('/') || sanitizedQuery.includes('\\')) {
+      pattern = path.join(resolvedPath, '**', `*${sanitizedQuery}*`);
+    } else if (sanitizedQuery) {
+      pattern = path.join(resolvedPath, '**', `*${sanitizedQuery}*`);
+    } else {
+      pattern = path.join(resolvedPath, '**', '*');
+    }
+
+    // Execute glob search
+    const files = await glob(pattern, {
+      cwd: resolvedPath,
+      absolute: false,
+      nodir: true,
+      ignore: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/dist/**',
+        '**/build/**',
+        '**/.claude/**',
+        '**/coverage/**',
+        '**/*.log',
+        '**/.DS_Store'
+      ],
+      limit: MAX_FILE_RESULTS
+    });
+
+    // Verify each file path stays within the project directory
+    const safeFiles = files.filter(file => {
+      const fullPath = path.resolve(resolvedPath, file);
+      return fullPath.startsWith(resolvedPath);
+    });
+
+    // Sort by relevance (exact matches first, then alphabetical)
+    const lowerQuery = sanitizedQuery.toLowerCase();
+    safeFiles.sort((a, b) => {
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      const aExact = aLower.includes(lowerQuery);
+      const bExact = bLower.includes(lowerQuery);
+
+      if (aExact && !bExact) return -1;
+      if (!aExact && bExact) return 1;
+      return a.localeCompare(b);
+    });
+
+    res.json({ files: safeFiles.slice(0, MAX_FILE_RESULTS) });
+
+  } catch (err) {
+    console.error('[Projects] File search error:', err);
+    res.status(500).json({ error: 'Failed to search files' });
+  }
+});
 
 export { router as projectRoutes };

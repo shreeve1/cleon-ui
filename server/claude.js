@@ -4,8 +4,12 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 
+// Constants
+const DEFAULT_CONTEXT_WINDOW = 200000;
+const TOOL_OUTPUT_TRUNCATE_LENGTH = 500;
+const TOOL_SUMMARY_TRUNCATE_LENGTH = 100;
+
 // Track active sessions for abort capability
-// Value: { queryInstance, ws }
 const activeSessions = new Map();
 
 // Track pending question responses - map of toolUseId -> { resolve, reject }
@@ -371,10 +375,10 @@ function transformMessage(msg) {
           id: toolResult.tool_use_id,
           success: !toolResult.is_error,
           output: truncateOutput(
-            typeof toolResult.content === 'string' 
-              ? toolResult.content 
+            typeof toolResult.content === 'string'
+              ? toolResult.content
               : JSON.stringify(toolResult.content),
-            500
+            TOOL_OUTPUT_TRUNCATE_LENGTH
           )
         };
       }
@@ -389,49 +393,23 @@ function transformMessage(msg) {
   return null;
 }
 
-/**
- * Generate human-readable tool summary
- */
+// Tool summary formatters (data-driven approach)
+const toolFormatters = {
+  bash: (i) => `$ ${truncateOutput(i.command || i.cmd || '', TOOL_SUMMARY_TRUNCATE_LENGTH)}`,
+  read: (i) => `Reading ${i.file_path || i.path || 'file'}`,
+  write: (i) => `Writing ${i.file_path || i.path || 'file'}`,
+  edit: (i) => `Editing ${i.file_path || i.path || 'file'}`,
+  glob: (i) => `Finding ${i.pattern || 'files'}`,
+  grep: (i) => `Searching: ${i.pattern || i.query || ''}`,
+  todowrite: () => 'Updating todo list',
+  todoread: () => 'Reading todo list',
+  task: () => 'Delegating task'
+};
+
 function getToolSummary(tool, input) {
   if (!input) return tool;
-
-  switch (tool) {
-    case 'Bash':
-    case 'bash':
-      return `$ ${truncateOutput(input.command || input.cmd || '', 100)}`;
-    
-    case 'Read':
-    case 'read':
-      return `Reading ${input.file_path || input.path || 'file'}`;
-    
-    case 'Write':
-    case 'write':
-      return `Writing ${input.file_path || input.path || 'file'}`;
-    
-    case 'Edit':
-    case 'edit':
-      return `Editing ${input.file_path || input.path || 'file'}`;
-    
-    case 'Glob':
-    case 'glob':
-      return `Finding ${input.pattern || 'files'}`;
-    
-    case 'Grep':
-    case 'grep':
-      return `Searching: ${input.pattern || input.query || ''}`;
-    
-    case 'TodoWrite':
-      return 'Updating todo list';
-    
-    case 'TodoRead':
-      return 'Reading todo list';
-    
-    case 'Task':
-      return `Delegating task`;
-    
-    default:
-      return tool;
-  }
+  const formatter = toolFormatters[tool.toLowerCase()];
+  return formatter ? formatter(input) : tool;
 }
 
 /**
@@ -460,7 +438,7 @@ function extractTokenUsage(modelUsage) {
   const cacheCreate = data.cumulativeCacheCreationInputTokens || data.cacheCreationInputTokens || 0;
 
   const used = input + output + cacheRead + cacheCreate;
-  const contextWindow = parseInt(process.env.CONTEXT_WINDOW) || 200000;
+  const contextWindow = parseInt(process.env.CONTEXT_WINDOW) || DEFAULT_CONTEXT_WINDOW;
 
   return { used, contextWindow };
 }
@@ -496,15 +474,8 @@ async function loadMcpConfig(projectPath) {
   }
 }
 
-// Cleanup stale sessions periodically (every 30 min)
+// Log active sessions periodically for monitoring
 setInterval(() => {
-  const staleTime = 2 * 60 * 60 * 1000; // 2 hours
-  const now = Date.now();
-  
-  for (const [sessionId, instance] of activeSessions.entries()) {
-    // Can't easily track start time, just log count
-  }
-  
   if (activeSessions.size > 0) {
     console.log(`[Claude] Active sessions: ${activeSessions.size}`);
   }

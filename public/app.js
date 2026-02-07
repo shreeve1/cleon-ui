@@ -1,3 +1,11 @@
+// Constants
+const MAX_ATTACHMENTS = 5;
+const PREVIEW_TRUNCATE_LENGTH = 100;
+const TOOL_COMMAND_PREVIEW_LENGTH = 80;
+const WS_RECONNECT_MAX_DELAY = 30000;
+const SEARCH_DEBOUNCE_MS = 300;
+
+// Consolidated state object
 const state = {
   token: localStorage.getItem('token'),
   ws: null,
@@ -10,7 +18,14 @@ const state = {
   modeIndex: 2,
   currentMode: 'bypass',
   pendingQuestion: null,
-  attachments: [] // Array of { id, type, name, data, preview, mediaType }
+  attachments: [],
+  // Previously scattered state variables
+  slashCommandSelectedIndex: -1,
+  fileMentionSelectedIndex: 0,
+  fileMentionQuery: '',
+  fileMentionStartPos: -1,
+  fileMentionDebounceTimer: null,
+  searchTimeout: null
 };
 
 // Mode configuration
@@ -155,13 +170,6 @@ async function loadCustomCommands(projectPath = null) {
   }
 }
 
-let slashCommandSelectedIndex = -1;
-
-// File mention state
-let fileMentionSelectedIndex = 0;
-let fileMentionQuery = '';
-let fileMentionStartPos = -1;
-let fileMentionDebounceTimer = null;
 
 async function init() {
   const status = await api('/api/auth/status').catch(() => ({ needsSetup: true }));
@@ -767,7 +775,7 @@ function handleSlashCommandInput() {
 }
 
 function renderSlashCommands(commands) {
-  slashCommandSelectedIndex = 0;
+  state.slashCommandSelectedIndex = 0;
   slashCommandsEl.innerHTML = commands.map((cmd, i) => {
     const sourceClass = `source-${cmd.source || 'builtin'}`;
     const sourceLabel = cmd.source === 'global' ? 'global' : cmd.source === 'project' ? 'project' : '';
@@ -781,13 +789,15 @@ function renderSlashCommands(commands) {
       </div>
     `;
   }).join('');
-
-  slashCommandsEl.querySelectorAll('.slash-command').forEach(el => {
-    el.addEventListener('click', () => {
-      insertSlashCommand(el.dataset.command);
-    });
-  });
 }
+
+// Event delegation for slash commands (avoids memory leaks)
+slashCommandsEl.addEventListener('click', (e) => {
+  const commandEl = e.target.closest('.slash-command');
+  if (commandEl) {
+    insertSlashCommand(commandEl.dataset.command);
+  }
+});
 
 function showSlashCommands() {
   slashCommandsEl.classList.remove('hidden');
@@ -795,7 +805,7 @@ function showSlashCommands() {
 
 function hideSlashCommands() {
   slashCommandsEl.classList.add('hidden');
-  slashCommandSelectedIndex = -1;
+  state.slashCommandSelectedIndex = -1;
 }
 
 function handleSlashCommandKeydown(e) {
@@ -804,21 +814,21 @@ function handleSlashCommandKeydown(e) {
   
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    slashCommandSelectedIndex = Math.min(slashCommandSelectedIndex + 1, items.length - 1);
+    state.slashCommandSelectedIndex = Math.min(state.slashCommandSelectedIndex + 1, items.length - 1);
     updateSlashCommandSelection(items);
     return true;
   }
   
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    slashCommandSelectedIndex = Math.max(slashCommandSelectedIndex - 1, 0);
+    state.slashCommandSelectedIndex = Math.max(state.slashCommandSelectedIndex - 1, 0);
     updateSlashCommandSelection(items);
     return true;
   }
   
   if (e.key === 'Enter' || e.key === 'Tab') {
     e.preventDefault();
-    const selected = items[slashCommandSelectedIndex];
+    const selected = items[state.slashCommandSelectedIndex];
     if (selected) {
       insertSlashCommand(selected.dataset.command);
     }
@@ -836,9 +846,9 @@ function handleSlashCommandKeydown(e) {
 
 function updateSlashCommandSelection(items) {
   items.forEach((item, i) => {
-    item.classList.toggle('selected', i === slashCommandSelectedIndex);
+    item.classList.toggle('selected', i === state.slashCommandSelectedIndex);
   });
-  items[slashCommandSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+  items[state.slashCommandSelectedIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 function insertSlashCommand(command) {
@@ -876,13 +886,13 @@ function handleFileMentionInput() {
     return;
   }
 
-  fileMentionQuery = textAfterAt;
-  fileMentionStartPos = lastAtIndex;
+  state.fileMentionQuery = textAfterAt;
+  state.fileMentionStartPos = lastAtIndex;
 
   // Debounce the API call
-  clearTimeout(fileMentionDebounceTimer);
-  fileMentionDebounceTimer = setTimeout(() => {
-    fetchFileMentions(fileMentionQuery);
+  clearTimeout(state.fileMentionDebounceTimer);
+  state.fileMentionDebounceTimer = setTimeout(() => {
+    fetchFileMentions(state.fileMentionQuery);
   }, 300);
 }
 
@@ -905,7 +915,7 @@ async function fetchFileMentions(query) {
 }
 
 function renderFileMentions(files, state = 'normal') {
-  fileMentionSelectedIndex = 0;
+  state.fileMentionSelectedIndex = 0;
 
   if (state === 'no-project') {
     fileMentionsEl.innerHTML = '<div class="file-mention-no-project">Select a project to search files</div>';
@@ -926,14 +936,15 @@ function renderFileMentions(files, state = 'normal') {
       </div>
     `;
   }).join('');
-
-  // Add click handlers
-  fileMentionsEl.querySelectorAll('.file-mention-item').forEach(el => {
-    el.addEventListener('click', () => {
-      selectFileMention(el.dataset.file);
-    });
-  });
 }
+
+// Event delegation for file mentions (avoids memory leaks)
+fileMentionsEl.addEventListener('click', (e) => {
+  const fileItem = e.target.closest('.file-mention-item');
+  if (fileItem) {
+    selectFileMention(fileItem.dataset.file);
+  }
+});
 
 function getFileIcon(filePath) {
   const ext = filePath.split('.').pop().toLowerCase();
@@ -969,10 +980,10 @@ function showFileMentions() {
 
 function hideFileMentions() {
   fileMentionsEl.classList.add('hidden');
-  fileMentionSelectedIndex = 0;
-  fileMentionQuery = '';
-  fileMentionStartPos = -1;
-  clearTimeout(fileMentionDebounceTimer);
+  state.fileMentionSelectedIndex = 0;
+  state.fileMentionQuery = '';
+  state.fileMentionStartPos = -1;
+  clearTimeout(state.fileMentionDebounceTimer);
 }
 
 function handleFileMentionKeydown(e) {
@@ -981,21 +992,21 @@ function handleFileMentionKeydown(e) {
 
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    fileMentionSelectedIndex = Math.min(fileMentionSelectedIndex + 1, items.length - 1);
+    state.fileMentionSelectedIndex = Math.min(state.fileMentionSelectedIndex + 1, items.length - 1);
     updateFileMentionSelection(items);
     return true;
   }
 
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    fileMentionSelectedIndex = Math.max(fileMentionSelectedIndex - 1, 0);
+    state.fileMentionSelectedIndex = Math.max(state.fileMentionSelectedIndex - 1, 0);
     updateFileMentionSelection(items);
     return true;
   }
 
   if (e.key === 'Enter' || e.key === 'Tab') {
     e.preventDefault();
-    const selected = items[fileMentionSelectedIndex];
+    const selected = items[state.fileMentionSelectedIndex];
     if (selected) {
       selectFileMention(selected.dataset.file);
     }
@@ -1013,14 +1024,14 @@ function handleFileMentionKeydown(e) {
 
 function updateFileMentionSelection(items) {
   items.forEach((item, i) => {
-    item.classList.toggle('selected', i === fileMentionSelectedIndex);
+    item.classList.toggle('selected', i === state.fileMentionSelectedIndex);
   });
-  items[fileMentionSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+  items[state.fileMentionSelectedIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 function selectFileMention(filePath) {
   const value = chatInput.value;
-  const before = value.slice(0, fileMentionStartPos);
+  const before = value.slice(0, state.fileMentionStartPos);
   const after = value.slice(chatInput.selectionStart);
   const formatted = `@"${filePath}"`;
 
@@ -1028,7 +1039,7 @@ function selectFileMention(filePath) {
   chatInput.focus();
 
   // Set cursor position after the inserted text
-  const newCursorPos = fileMentionStartPos + formatted.length;
+  const newCursorPos = state.fileMentionStartPos + formatted.length;
   chatInput.setSelectionRange(newCursorPos, newCursorPos);
 
   hideFileMentions();
@@ -1081,10 +1092,9 @@ menuBtn.addEventListener('click', openSidebar);
 closeSidebarBtn.addEventListener('click', closeSidebar);
 sidebarOverlay.addEventListener('click', closeSidebar);
 
-let searchTimeout;
 projectSearch.addEventListener('input', () => {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => searchProjects(projectSearch.value), 300);
+  clearTimeout(state.searchTimeout);
+  state.searchTimeout = setTimeout(() => searchProjects(projectSearch.value), SEARCH_DEBOUNCE_MS);
 });
 
 projectSearch.addEventListener('focus', () => {
@@ -1429,7 +1439,10 @@ async function uploadFile(file) {
   });
 
   if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json().catch(err => {
+      console.error('[Upload] Failed to parse error response:', err);
+      return {};
+    });
     throw new Error(data.error || 'File upload failed');
   }
 
@@ -1438,9 +1451,8 @@ async function uploadFile(file) {
 
 // Process and add a file as an attachment
 async function processAndAddAttachment(file) {
-  // Check max attachments
-  if (state.attachments.length >= 5) {
-    alert('Maximum 5 attachments allowed');
+  if (state.attachments.length >= MAX_ATTACHMENTS) {
+    alert(`Maximum ${MAX_ATTACHMENTS} attachments allowed`);
     return;
   }
 
@@ -1491,7 +1503,7 @@ function renderAttachmentPreview() {
       return `
         <div class="attachment-item image" data-id="${att.id}">
           <img src="${att.preview}" alt="${escapeAttr(att.name)}">
-          <button class="attachment-remove" onclick="removeAttachment('${att.id}')">&times;</button>
+          <button class="attachment-remove" aria-label="Remove attachment">&times;</button>
         </div>
       `;
     }
@@ -1501,17 +1513,28 @@ function renderAttachmentPreview() {
       <div class="attachment-item" data-id="${att.id}">
         <span class="attachment-icon">${icon}</span>
         <span class="attachment-name">${escapeHtml(att.name)}</span>
-        <button class="attachment-remove" onclick="removeAttachment('${att.id}')">&times;</button>
+        <button class="attachment-remove" aria-label="Remove attachment">&times;</button>
       </div>
     `;
   }).join('');
 }
 
-// Remove attachment by ID (global function for onclick)
-window.removeAttachment = function(id) {
+// Remove attachment by ID via event delegation
+function removeAttachment(id) {
   state.attachments = state.attachments.filter(att => att.id !== id);
   renderAttachmentPreview();
-};
+}
+
+// Event delegation for attachment removal
+attachmentPreviewEl.addEventListener('click', (e) => {
+  const removeBtn = e.target.closest('.attachment-remove');
+  if (removeBtn) {
+    const attachmentItem = removeBtn.closest('.attachment-item');
+    if (attachmentItem) {
+      removeAttachment(attachmentItem.dataset.id);
+    }
+  }
+});
 
 // Format user message display with attachments
 function formatUserMessageWithAttachments(content, attachments) {

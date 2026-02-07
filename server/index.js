@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import helmet from 'helmet';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
 import { handleChat, handleAbort, handleQuestionResponse } from './claude.js';
 import { getAllCommands } from './commands.js';
 import { processUpload, validateFile } from './uploads.js';
+import logger from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,7 +24,81 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = http.createServer(app);
 
-app.use(express.json());
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      connectSrc: ["'self'", "ws:", "wss:"],
+      imgSrc: ["'self'", "data:", "blob:"]
+    }
+  }
+}));
+
+// CORS configuration
+const configuredOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : [];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // Same-origin, Postman, mobile apps
+  if (configuredOrigins.includes(origin)) return true;
+  // Always allow local development
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+    // Allow local network IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    if (/^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(hostname)) return true;
+  } catch {}
+  return false;
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api/', limiter);
+
+// Stricter rate limit for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10, // only 10 login/register attempts per 15 min
+  message: { error: 'Too many authentication attempts, please try again later' }
+});
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+
+// Body parsing with size limit
+app.use(express.json({ limit: '1mb' }));
+
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info(`${req.method} ${req.path}`, {
+      status: res.statusCode,
+      duration: `${duration}ms`,
+      ip: req.ip
+    });
+  });
+  next();
+});
 
 // Configure multer for file uploads (memory storage)
 const upload = multer({
@@ -46,7 +125,7 @@ app.get('/api/commands', authenticateToken, async (req, res) => {
     const commands = await getAllCommands(projectPath);
     res.json(commands);
   } catch (err) {
-    console.error('[Commands] Error fetching commands:', err);
+    logger.error('Error fetching commands', { error: err.message, projectPath: req.query.projectPath });
     res.status(500).json({ error: 'Failed to fetch commands' });
   }
 });
@@ -63,7 +142,7 @@ app.post('/api/upload', authenticateToken, upload.single('file'), async (req, re
 
     res.json(result);
   } catch (err) {
-    console.error('[Upload] Error:', err);
+    logger.error('File upload error', { error: err.message, filename: req.file?.originalname });
     res.status(400).json({ error: err.message });
   }
 });
@@ -77,17 +156,24 @@ app.get('*', (req, res) => {
   }
 });
 
-// WebSocket server
+// WebSocket server with origin validation
 const wss = new WebSocketServer({
   server,
   verifyClient: (info) => {
+    // Validate origin
+    const origin = info.origin || info.req.headers.origin;
+    if (!isAllowedOrigin(origin)) {
+      logger.warn('WebSocket connection rejected: invalid origin', { origin });
+      return false;
+    }
+
     // Extract token from query string
     const url = new URL(info.req.url, 'http://localhost');
     const token = url.searchParams.get('token');
-    
+
     const user = authenticateWebSocket(token);
     if (!user) {
-      console.log('[WS] Connection rejected: invalid token');
+      logger.warn('WebSocket connection rejected: invalid token');
       return false;
     }
 
@@ -100,7 +186,7 @@ const wss = new WebSocketServer({
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
   const user = req.user;
-  console.log(`[WS] Connected: ${user.username}`);
+  logger.info('WebSocket connected', { username: user.username });
 
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -141,11 +227,11 @@ wss.on('connection', (ws, req) => {
           break;
 
         default:
-          console.log(`[WS] Unknown message type: ${msg.type}`);
+          logger.debug('Unknown WebSocket message type', { type: msg.type });
       }
 
     } catch (err) {
-      console.error('[WS] Message handling error:', err);
+      logger.error('WebSocket message handling error', { error: err.message, username: user.username });
       ws.send(JSON.stringify({
         type: 'error',
         message: err.message || 'Internal error'
@@ -154,11 +240,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    console.log(`[WS] Disconnected: ${user.username}`);
+    logger.info('WebSocket disconnected', { username: user.username });
   });
 
   ws.on('error', (err) => {
-    console.error(`[WS] Error for ${user.username}:`, err.message);
+    logger.error('WebSocket error', { username: user.username, error: err.message });
   });
 });
 
@@ -178,33 +264,29 @@ wss.on('close', () => {
 });
 
 // Start server
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3010;
 const HOST = process.env.HOST || '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
-  console.log('');
-  console.log('  Claude Lite');
-  console.log('  ───────────────────────────────');
-  console.log(`  Local:    http://localhost:${PORT}`);
-  console.log(`  Network:  http://${HOST}:${PORT}`);
-  console.log('');
-  console.log('  Ready for connections');
-  console.log('');
+  logger.info('Cleon UI started', {
+    local: `http://localhost:${PORT}`,
+    network: `http://${HOST}:${PORT}`
+  });
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('[Server] SIGTERM received, shutting down...');
+  logger.info('SIGTERM received, shutting down...');
   server.close(() => {
-    console.log('[Server] Closed');
+    logger.info('Server closed');
     process.exit(0);
   });
 });
 
 process.on('SIGINT', () => {
-  console.log('[Server] SIGINT received, shutting down...');
+  logger.info('SIGINT received, shutting down...');
   server.close(() => {
-    console.log('[Server] Closed');
+    logger.info('Server closed');
     process.exit(0);
   });
 });

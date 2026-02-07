@@ -1,7 +1,7 @@
 # Plan: Fix Plan Mode Question Display
 
 ## Task Description
-The web UI for Claude Lite has a "plan mode" feature that uses `permissionMode: 'plan'` from the Claude Agent SDK. In this mode, Claude can ask questions using the `mcp_question` tool before proceeding. Currently, the UI shows that a tool is being used but **does not display the actual questions or options**, and users **cannot respond to the questions**.
+The web UI for Cleon UI (formerly Claude Lite) has a "plan mode" feature that uses `permissionMode: 'plan'` from the Claude Agent SDK. In this mode, Claude can ask questions using the `mcp_question` tool before proceeding. Currently, the UI shows that a tool is being used but **does not display the actual questions or options**, and users **cannot respond to the questions**.
 
 ## Objective
 Enable users to see and interact with questions asked by Claude in plan mode by:

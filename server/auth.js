@@ -8,9 +8,16 @@ import fs from 'fs';
 
 const router = express.Router();
 
-// Database in ~/.claude-lite/
-const dbDir = path.join(os.homedir(), '.claude-lite');
-if (!fs.existsSync(dbDir)) {
+// Database in ~/.cleon-ui/
+// Migrate from old directory if it exists
+const oldDbDir = path.join(os.homedir(), '.claude-lite');
+const dbDir = path.join(os.homedir(), '.cleon-ui');
+
+if (!fs.existsSync(dbDir) && fs.existsSync(oldDbDir)) {
+  console.log('[Auth] Migrating from .claude-lite to .cleon-ui...');
+  fs.renameSync(oldDbDir, dbDir);
+  console.log('[Auth] Migration complete');
+} else if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
@@ -26,12 +33,23 @@ db.exec(`
   )
 `);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'claude-lite-dev-secret-change-in-prod';
+const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRY = '7d';
 
-/**
- * Check if any user exists (single-user mode)
- */
+// Enforce JWT_SECRET in production
+if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET environment variable must be set in production');
+  }
+  console.warn('[Auth] WARNING: JWT_SECRET not set. Using insecure default for development only.');
+}
+
+const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'cleon-ui-dev-secret-DO-NOT-USE-IN-PROD';
+
+if (JWT_SECRET && JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET must be at least 32 characters for security');
+}
+
 function hasUser() {
   const result = db.prepare('SELECT COUNT(*) as count FROM users').get();
   return result.count > 0;
@@ -76,7 +94,7 @@ router.post('/register', async (req, res) => {
     db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)')
       .run(username, hash);
 
-    console.log(`[Auth] Account created: ${username}`);
+    console.log(`[Cleon Auth] Account created: ${username}`);
     res.json({ success: true, message: 'Account created. Please log in.' });
 
   } catch (err) {
@@ -111,11 +129,11 @@ router.post('/login', async (req, res) => {
 
     const token = jwt.sign(
       { id: user.id, username: user.username },
-      JWT_SECRET,
+      EFFECTIVE_JWT_SECRET,
       { expiresIn: JWT_EXPIRY }
     );
 
-    console.log(`[Auth] Login successful: ${username}`);
+    console.log(`[Cleon Auth] Login successful: ${username}`);
     res.json({ token, username: user.username });
 
   } catch (err) {
@@ -136,7 +154,7 @@ export function authenticateToken(req, res, next) {
   }
 
   try {
-    const user = jwt.verify(token, JWT_SECRET);
+    const user = jwt.verify(token, EFFECTIVE_JWT_SECRET);
     req.user = user;
     next();
   } catch (err) {
@@ -150,9 +168,9 @@ export function authenticateToken(req, res, next) {
  */
 export function authenticateWebSocket(token) {
   if (!token) return null;
-  
+
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, EFFECTIVE_JWT_SECRET);
   } catch {
     return null;
   }

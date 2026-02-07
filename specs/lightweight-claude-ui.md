@@ -1,4 +1,6 @@
-# Lightweight Claude UI Specification
+# Cleon UI - Lightweight Web Interface Specification
+
+> **Historical Note:** This project was originally developed under the name "Claude Lite" and was rebranded to "Cleon UI" in February 2025.
 
 ## Overview
 
@@ -36,7 +38,7 @@ A minimal, mobile-first web interface for Claude Code. Access your Claude Code s
 ## Architecture
 
 ```
-claude-lite/
+cleon-ui/
 ├── package.json
 ├── server/
 │   ├── index.js          # Express + WebSocket (~150 lines)
@@ -162,8 +164,8 @@ import os from 'os';
 
 const router = express.Router();
 
-// Database in ~/.claude-lite/
-const dbDir = path.join(os.homedir(), '.claude-lite');
+// Database in ~/.cleon-ui/
+const dbDir = path.join(os.homedir(), '.cleon-ui');
 const db = new Database(path.join(dbDir, 'auth.db'));
 
 // Initialize
@@ -616,7 +618,7 @@ Mobile-first, single page, no build step.
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#1a1a1a">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Claude Lite</title>
+  <title>Cleon UI</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -624,7 +626,7 @@ Mobile-first, single page, no build step.
     <!-- Auth Screen -->
     <div id="auth-screen" class="screen">
       <div class="auth-container">
-        <h1>Claude Lite</h1>
+        <h1>Cleon UI</h1>
         <form id="auth-form">
           <input type="text" id="username" placeholder="Username" autocomplete="username" required>
           <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
@@ -1520,7 +1522,7 @@ html, body {
 
 ## Key Differences from Full Claude UI
 
-| Aspect | Full Version | Claude Lite |
+| Aspect | Full Version | Cleon UI |
 |--------|--------------|-------------|
 | Frontend | React + Vite | Vanilla JS |
 | Build step | Required | None |

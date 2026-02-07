@@ -6,3 +6,6 @@ logs/
 *.png
 .claude/
 .claude-uploads/
+debug-snapshot/
+test-results/
+sessions/
