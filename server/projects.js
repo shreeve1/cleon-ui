@@ -155,23 +155,23 @@ router.get('/:name/path', async (req, res) => {
 async function extractProjectPath(projectDir, projectName) {
   try {
     const files = await fs.readdir(projectDir);
-    const jsonlFile = files.find(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    const jsonlFiles = files.filter(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
 
-    if (!jsonlFile) {
-      return decodeProjectName(projectName);
-    }
-
-    const content = await fs.readFile(path.join(projectDir, jsonlFile), 'utf8');
-    const lines = content.split('\n').filter(Boolean);
-
-    // Look for cwd field in first few entries
-    for (const line of lines.slice(0, 30)) {
+    // Try each session file until we find one with a cwd field
+    for (const jsonlFile of jsonlFiles) {
       try {
-        const entry = JSON.parse(line);
-        if (entry.cwd) {
-          return entry.cwd;
+        const content = await fs.readFile(path.join(projectDir, jsonlFile), 'utf8');
+        const lines = content.split('\n').filter(Boolean);
+
+        for (const line of lines.slice(0, 30)) {
+          try {
+            const entry = JSON.parse(line);
+            if (entry.cwd) {
+              return entry.cwd;
+            }
+          } catch { /* skip malformed */ }
         }
-      } catch { /* skip malformed */ }
+      } catch { /* skip unreadable files */ }
     }
 
     return decodeProjectName(projectName);

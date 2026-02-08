@@ -372,19 +372,22 @@ body::after {
 /* Custom scrollbar */
 #project-list::-webkit-scrollbar,
 #session-list::-webkit-scrollbar,
-#messages::-webkit-scrollbar {
+#messages::-webkit-scrollbar,
+.session-container::-webkit-scrollbar {
   width: 6px;
 }
 
 #project-list::-webkit-scrollbar-track,
 #session-list::-webkit-scrollbar-track,
-#messages::-webkit-scrollbar-track {
+#messages::-webkit-scrollbar-track,
+.session-container::-webkit-scrollbar-track {
   background: var(--bg);
 }
 
 #project-list::-webkit-scrollbar-thumb,
 #session-list::-webkit-scrollbar-thumb,
-#messages::-webkit-scrollbar-thumb {
+#messages::-webkit-scrollbar-thumb,
+.session-container::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, var(--neon-pink), var(--neon-purple));
   border-radius: 3px;
 }
@@ -545,6 +548,126 @@ body::after {
   padding: 16px;
   min-height: 0;
   overscroll-behavior: contain;
+}
+
+#session-containers {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-container {
+  flex: 1 1 0;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  padding: 16px;
+  min-height: 0;
+  overscroll-behavior: contain;
+  display: none;
+  flex-direction: column;
+}
+
+.session-container.active {
+  display: flex;
+}
+
+/* Session status bar */
+#session-bar {
+  display: none;
+  flex-direction: row;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  gap: 4px;
+  min-height: 36px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+}
+
+#session-bar.visible {
+  display: flex;
+}
+
+#session-tabs {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: monospace;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  transition: all 0.15s ease;
+}
+
+.session-tab.active {
+  background: rgba(0, 240, 255, 0.1);
+  border-color: var(--neon-cyan);
+  color: var(--neon-cyan);
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+}
+
+.session-tab.unread::after {
+  content: '*';
+  color: var(--neon-pink);
+  font-weight: bold;
+  margin-left: 2px;
+  animation: pulse-unread 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-unread {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.session-tab .close-tab {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--neon-red);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.session-tab:hover .close-tab {
+  display: inline;
+}
+
+#new-session-tab-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px dashed var(--neon-green);
+  border-radius: 4px;
+  color: var(--neon-green);
+  font-family: monospace;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+#new-session-tab-btn:hover {
+  background: rgba(57, 255, 20, 0.1);
+  box-shadow: 0 0 8px rgba(57, 255, 20, 0.3);
 }
 
 .welcome-message {
@@ -1229,6 +1352,20 @@ body::after {
 }
 
 /* Tablet+ */
+/* Mobile: session tabs show numbers only */
+@media (max-width: 767px) {
+  .session-tab .session-tab-name {
+    display: none;
+  }
+  .session-tab {
+    min-width: 32px;
+    justify-content: center;
+  }
+  .session-tab .close-tab {
+    display: none !important;
+  }
+}
+
 @media (min-width: 768px) {
   #sidebar {
     position: fixed;
@@ -1248,6 +1385,10 @@ body::after {
   }
 
   #messages {
+    padding: 24px;
+  }
+
+  .session-container {
     padding: 24px;
   }
 }
