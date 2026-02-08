@@ -19,6 +19,9 @@ const state = {
   currentMode: 'bypass',
   pendingQuestion: null,
   attachments: [],
+  // Token usage tracking for /tokens and /context commands
+  lastTokenUsage: null,
+  lastContextWindow: null,
   // Previously scattered state variables
   slashCommandSelectedIndex: -1,
   fileMentionSelectedIndex: 0,
@@ -134,6 +137,139 @@ const BUILTIN_COMMANDS = [
   { name: '/context', desc: 'Show context window information', source: 'builtin' },
   { name: '/reset', desc: 'Reset conversation context', source: 'builtin' }
 ];
+
+// Built-in command handlers - commands that execute locally in the UI
+// Commands not in this map (like /compact, /verbose) are sent to Claude
+const BUILTIN_COMMAND_HANDLERS = {
+  '/clear': handleClearCommand,
+  '/reset': handleClearCommand, // Same behavior as /clear
+  '/help': handleHelpCommand,
+  '/tokens': handleTokensCommand,
+  '/context': handleContextCommand,
+  '/model': handleModelCommand
+};
+
+// Check if a message is a built-in command that should be handled locally
+function isLocalBuiltinCommand(message) {
+  const trimmed = message.trim();
+  const command = trimmed.split(/\s+/)[0].toLowerCase();
+  return command in BUILTIN_COMMAND_HANDLERS;
+}
+
+// Parse command and arguments from message
+function parseCommand(message) {
+  const trimmed = message.trim();
+  const parts = trimmed.split(/\s+/);
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1).join(' ');
+  return { command, args };
+}
+
+// Execute a built-in command locally
+function executeBuiltinCommand(command, args) {
+  const handler = BUILTIN_COMMAND_HANDLERS[command];
+  if (handler) {
+    handler(args);
+    return true;
+  }
+  return false;
+}
+
+// Handler for /clear and /reset commands
+function handleClearCommand() {
+  if (!state.currentProject) {
+    appendCommandMessage('Please select a project first.');
+    return;
+  }
+
+  state.currentSessionId = null;
+  updateHash(state.currentProject.name);
+  clearMessages();
+  appendCommandMessage('Session cleared. Starting fresh.');
+}
+
+// Handler for /help command
+function handleHelpCommand() {
+  const commands = getAllCommands();
+
+  // Group commands by source
+  const builtin = commands.filter(c => c.source === 'builtin');
+  const global = commands.filter(c => c.source === 'global');
+  const project = commands.filter(c => c.source === 'project');
+
+  let helpText = 'Available Commands:\n\n';
+
+  if (builtin.length > 0) {
+    helpText += 'Built-in:\n';
+    for (const cmd of builtin) {
+      helpText += `  ${cmd.name} - ${cmd.desc}\n`;
+    }
+  }
+
+  if (global.length > 0) {
+    helpText += '\nGlobal:\n';
+    for (const cmd of global) {
+      helpText += `  ${cmd.name} - ${cmd.desc}\n`;
+    }
+  }
+
+  if (project.length > 0) {
+    helpText += '\nProject:\n';
+    for (const cmd of project) {
+      helpText += `  ${cmd.name} - ${cmd.desc}\n`;
+    }
+  }
+
+  appendCommandMessage(helpText);
+}
+
+// Handler for /tokens command
+function handleTokensCommand() {
+  if (state.lastTokenUsage === null) {
+    appendCommandMessage('No token usage data yet. Send a message first.');
+    return;
+  }
+
+  const usedK = Math.round(state.lastTokenUsage / 1000);
+  const totalK = Math.round(state.lastContextWindow / 1000);
+  const pct = Math.round((state.lastTokenUsage / state.lastContextWindow) * 100);
+
+  appendCommandMessage(`Token Usage: ${usedK}k / ${totalK}k (${pct}%)`);
+}
+
+// Handler for /context command
+function handleContextCommand() {
+  if (state.lastContextWindow === null) {
+    appendCommandMessage('No context data yet. Send a message first.');
+    return;
+  }
+
+  const usedK = state.lastTokenUsage ? Math.round(state.lastTokenUsage / 1000) : 0;
+  const totalK = Math.round(state.lastContextWindow / 1000);
+  const pct = state.lastTokenUsage ? Math.round((state.lastTokenUsage / state.lastContextWindow) * 100) : 0;
+  const remaining = state.lastContextWindow - (state.lastTokenUsage || 0);
+  const remainingK = Math.round(remaining / 1000);
+
+  appendCommandMessage(`Context Window: ${totalK}k tokens total\nUsed: ${usedK}k (${pct}%)\nRemaining: ${remainingK}k`);
+}
+
+// Handler for /model command
+function handleModelCommand() {
+  appendCommandMessage('Model: Claude (via Claude Code SDK)\nModel switching is not yet supported in the web UI.');
+}
+
+// Append a command feedback message (styled differently from assistant messages)
+function appendCommandMessage(content) {
+  removeWelcome();
+  const div = document.createElement('div');
+  div.className = 'message command-feedback';
+  div.style.borderLeft = '3px solid var(--neon-cyan)';
+  div.style.fontFamily = 'monospace';
+  div.style.whiteSpace = 'pre-wrap';
+  div.textContent = content;
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
 
 // Get all commands merged (builtin + global + project)
 function getAllCommands() {
@@ -583,8 +719,11 @@ function handleCustomInputChange(inputEl) {
 }
 
 function updateSubmitButtonState() {
-  const questionBlock = messagesEl.querySelector('.message.question-block');
-  if (!questionBlock || !state.pendingQuestion) return;
+  if (!state.pendingQuestion) return;
+  const questionBlock = messagesEl.querySelector(
+    `.message.question-block[data-question-id="${state.pendingQuestion.id}"]`
+  );
+  if (!questionBlock) return;
   
   const submitBtn = questionBlock.querySelector('.question-submit');
   const totalQuestions = state.pendingQuestion.questions.length;
@@ -606,8 +745,10 @@ function submitQuestionResponse() {
     toolUseId: state.pendingQuestion.id,
     answers: answers
   }));
-  
-  const questionBlock = messagesEl.querySelector('.message.question-block');
+
+  const questionBlock = messagesEl.querySelector(
+    `.message.question-block[data-question-id="${state.pendingQuestion.id}"]`
+  );
   if (questionBlock) {
     questionBlock.classList.add('submitted');
     const submitBtn = questionBlock.querySelector('.question-submit');
@@ -661,6 +802,16 @@ chatForm.addEventListener('submit', (e) => {
 });
 
 function sendMessage(content) {
+  // Check if this is a local built-in command (e.g., /clear, /help, /tokens)
+  // Commands like /compact and /verbose are NOT in the handler map and will be sent to Claude
+  if (isLocalBuiltinCommand(content)) {
+    const { command, args } = parseCommand(content);
+    executeBuiltinCommand(command, args);
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+    return; // Don't send to Claude
+  }
+
   const mode = MODES[state.modeIndex];
 
   const message = {
@@ -1285,12 +1436,16 @@ function enableChat() {
 }
 
 function updateTokenUsage(used, total) {
+  // Store in state for /tokens and /context commands
+  state.lastTokenUsage = used;
+  state.lastContextWindow = total;
+
   const usedK = Math.round(used / 1000);
   const totalK = Math.round(total / 1000);
   const pct = Math.round((used / total) * 100);
   tokenUsageEl.textContent = `${usedK}k / ${totalK}k (${pct}%)`;
   tokenUsageEl.classList.remove('hidden');
-  
+
   if (pct > 80) {
     tokenUsageEl.style.color = 'var(--warning)';
   } else if (pct > 95) {
