@@ -234,6 +234,7 @@ wss.on('connection', (ws, req) => {
       logger.error('WebSocket message handling error', { error: err.message, username: user.username });
       ws.send(JSON.stringify({
         type: 'error',
+        sessionId: msg.sessionId || null,
         message: err.message || 'Internal error'
       }));
     }

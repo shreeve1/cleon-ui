@@ -231,6 +231,7 @@ export async function handleChat(msg, ws) {
     console.error('[Claude] Query error:', err);
     sendMessage(ws, {
       type: 'error',
+      sessionId: currentSessionId || msg.sessionId || null,
       message: err.message || 'Query failed'
     });
   } finally {

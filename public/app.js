@@ -5,31 +5,208 @@ const TOOL_COMMAND_PREVIEW_LENGTH = 80;
 const WS_RECONNECT_MAX_DELAY = 30000;
 const SEARCH_DEBOUNCE_MS = 300;
 
-// Consolidated state object
+const MAX_SESSIONS = 5;
+
 const state = {
   token: localStorage.getItem('token'),
   ws: null,
   wsReconnectAttempts: 0,
-  currentProject: null,
-  currentSessionId: null,
-  isStreaming: false,
-  pendingText: '',
-  customCommands: [],
+  // Multi-session state
+  sessions: [],              // Array of session objects
+  activeSessionIndex: -1,    // Index into sessions array, -1 = none
+  // UI state (shared across sessions)
   modeIndex: 2,
   currentMode: 'bypass',
-  pendingQuestion: null,
-  attachments: [],
-  // Token usage tracking for /tokens and /context commands
-  lastTokenUsage: null,
-  lastContextWindow: null,
-  // Previously scattered state variables
-  slashCommandSelectedIndex: -1,
-  fileMentionSelectedIndex: 0,
-  fileMentionQuery: '',
-  fileMentionStartPos: -1,
-  fileMentionDebounceTimer: null,
-  searchTimeout: null
+  searchTimeout: null,
+  customCommands: []
 };
+
+// Session object factory
+function createSession(project, sessionId = null) {
+  return {
+    id: crypto.randomUUID(),          // Internal tab ID
+    sessionId: sessionId,              // Claude SDK session ID (null = new)
+    project: project,                  // { name, path, displayName }
+    isStreaming: false,
+    pendingText: '',
+    pendingQuestion: null,
+    attachments: [],
+    lastTokenUsage: null,
+    lastContextWindow: null,
+    hasUnread: false,
+    containerEl: null,                 // DOM reference
+    // File mention state (per-session)
+    fileMentionSelectedIndex: 0,
+    fileMentionQuery: '',
+    fileMentionStartPos: -1,
+    fileMentionDebounceTimer: null,
+    slashCommandSelectedIndex: -1
+  };
+}
+
+function getActiveSession() {
+  if (state.activeSessionIndex < 0 || state.activeSessionIndex >= state.sessions.length) return null;
+  return state.sessions[state.activeSessionIndex];
+}
+
+function getSessionByInternalId(id) {
+  return state.sessions.find(s => s.id === id) || null;
+}
+
+function getSessionBySessionId(sessionId) {
+  return state.sessions.find(s => s.sessionId === sessionId) || null;
+}
+
+function createSessionContainer(session) {
+  const container = document.createElement('div');
+  container.className = 'session-container';
+  container.dataset.sessionId = session.id;
+  document.getElementById('session-containers').appendChild(container);
+  session.containerEl = container;
+  return container;
+}
+
+function renderSessionBar() {
+  if (state.sessions.length === 0) {
+    sessionBarEl.classList.remove('visible');
+    return;
+  }
+  sessionBarEl.classList.add('visible');
+  sessionTabsEl.innerHTML = state.sessions.map((s, i) => `
+    <button class="session-tab${i === state.activeSessionIndex ? ' active' : ''}${s.hasUnread ? ' unread' : ''}" data-index="${i}">
+      <span class="session-tab-number">[${i + 1}]</span>
+      <span class="session-tab-name">${escapeHtml(s.project.displayName || s.project.name)}</span>
+      <span class="close-tab" title="Close session">&times;</span>
+    </button>
+  `).join('');
+}
+
+function switchToSession(index) {
+  if (index < 0 || index >= state.sessions.length) return;
+  if (index === state.activeSessionIndex) return;
+
+  const currentSession = getActiveSession();
+  if (currentSession) {
+    currentSession.containerEl.classList.remove('active');
+    hideSlashCommands();
+    hideFileMentions();
+    clearTimeout(currentSession.fileMentionDebounceTimer);
+  }
+
+  state.activeSessionIndex = index;
+  const newSession = getActiveSession();
+
+  newSession.containerEl.classList.add('active');
+  newSession.hasUnread = false;
+
+  if (newSession.isStreaming) {
+    abortBtn.classList.remove('hidden');
+    chatInput.disabled = true;
+    sendBtn.disabled = true;
+    modeBtn.disabled = true;
+    attachBtn.disabled = true;
+  } else {
+    abortBtn.classList.add('hidden');
+    chatInput.disabled = false;
+    sendBtn.disabled = false;
+    modeBtn.disabled = false;
+    attachBtn.disabled = false;
+  }
+
+  projectNameEl.textContent = newSession.project.displayName || newSession.project.name;
+  updateTokenUsage(newSession.lastTokenUsage, newSession.lastContextWindow, newSession);
+  renderAttachmentPreview();
+  updateHash(newSession.project.name, newSession.sessionId);
+  renderSessionBar();
+  saveSessionState();
+  if (!newSession.isStreaming) chatInput.focus();
+}
+
+function closeSession(index) {
+  if (index < 0 || index >= state.sessions.length) return;
+  const session = state.sessions[index];
+
+  // Abort if streaming
+  if (session.isStreaming && session.sessionId) {
+    state.ws.send(JSON.stringify({ type: 'abort', sessionId: session.sessionId }));
+  }
+
+  // Clean up timers
+  clearTimeout(session.fileMentionDebounceTimer);
+
+  // Remove DOM container
+  if (session.containerEl) session.containerEl.remove();
+
+  // Remove from array
+  state.sessions.splice(index, 1);
+
+  // Adjust active index
+  if (state.sessions.length === 0) {
+    state.activeSessionIndex = -1;
+    renderSessionBar();
+    openSidebar();
+    return;
+  }
+
+  if (index === state.activeSessionIndex) {
+    // Switch to nearest session
+    const newIndex = Math.min(index, state.sessions.length - 1);
+    state.activeSessionIndex = -1; // Reset so switchToSession doesn't early-return
+    switchToSession(newIndex);
+  } else if (index < state.activeSessionIndex) {
+    state.activeSessionIndex--;
+    renderSessionBar();
+  } else {
+    renderSessionBar();
+  }
+
+  saveSessionState();
+}
+
+function saveSessionState() {
+  const sessionData = state.sessions.map(s => ({
+    sessionId: s.sessionId,
+    project: s.project,
+    lastTokenUsage: s.lastTokenUsage,
+    lastContextWindow: s.lastContextWindow
+  }));
+  localStorage.setItem('cleon-sessions', JSON.stringify(sessionData));
+  localStorage.setItem('cleon-active-session', String(state.activeSessionIndex));
+}
+
+function restoreSessionState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('cleon-sessions'));
+    const activeIndex = parseInt(localStorage.getItem('cleon-active-session')) || 0;
+    if (!saved || saved.length === 0) return false;
+
+    for (const data of saved) {
+      const session = createSession(data.project, data.sessionId);
+      session.lastTokenUsage = data.lastTokenUsage;
+      session.lastContextWindow = data.lastContextWindow;
+      state.sessions.push(session);
+      createSessionContainer(session);
+      // Populate container with appropriate initial content
+      if (session.sessionId) {
+        session.containerEl.innerHTML = `
+          <div class="welcome-message">
+            <h2>Session Resumed</h2>
+            <p>Continue your conversation with Claude.</p>
+          </div>
+        `;
+      } else {
+        clearMessages(session);
+      }
+    }
+
+    if (state.sessions.length > 0) {
+      state.activeSessionIndex = -1;
+      switchToSession(Math.min(activeIndex, state.sessions.length - 1));
+      enableChat();
+    }
+    return state.sessions.length > 0;
+  } catch { return false; }
+}
 
 // Mode configuration
 const MODES = [
@@ -115,7 +292,10 @@ const chatForm = $('#chat-form');
 const chatInput = $('#chat-input');
 const sendBtn = $('#send-btn');
 const modeBtn = $('#mode-btn');
-const messagesEl = $('#messages');
+const sessionContainersEl = $('#session-containers');
+const sessionBarEl = $('#session-bar');
+const sessionTabsEl = $('#session-tabs');
+const newSessionTabBtn = $('#new-session-tab-btn');
 const abortBtn = $('#abort-btn');
 const projectNameEl = $('#project-name');
 const tokenUsageEl = $('#token-usage');
@@ -177,15 +357,18 @@ function executeBuiltinCommand(command, args) {
 
 // Handler for /clear and /reset commands
 function handleClearCommand() {
-  if (!state.currentProject) {
+  const session = getActiveSession();
+  if (!session) {
     appendCommandMessage('Please select a project first.');
     return;
   }
 
-  state.currentSessionId = null;
-  updateHash(state.currentProject.name);
-  clearMessages();
-  appendCommandMessage('Session cleared. Starting fresh.');
+  session.sessionId = null;
+  updateHash(session.project.name);
+  clearMessages(session);
+  enableChat();
+  appendCommandMessage('Session cleared. Starting fresh.', session);
+  saveSessionState();
 }
 
 // Handler for /help command
@@ -225,29 +408,31 @@ function handleHelpCommand() {
 
 // Handler for /tokens command
 function handleTokensCommand() {
-  if (state.lastTokenUsage === null) {
+  const session = getActiveSession();
+  if (!session || session.lastTokenUsage === null) {
     appendCommandMessage('No token usage data yet. Send a message first.');
     return;
   }
 
-  const usedK = Math.round(state.lastTokenUsage / 1000);
-  const totalK = Math.round(state.lastContextWindow / 1000);
-  const pct = Math.round((state.lastTokenUsage / state.lastContextWindow) * 100);
+  const usedK = Math.round(session.lastTokenUsage / 1000);
+  const totalK = Math.round(session.lastContextWindow / 1000);
+  const pct = Math.round((session.lastTokenUsage / session.lastContextWindow) * 100);
 
   appendCommandMessage(`Token Usage: ${usedK}k / ${totalK}k (${pct}%)`);
 }
 
 // Handler for /context command
 function handleContextCommand() {
-  if (state.lastContextWindow === null) {
+  const session = getActiveSession();
+  if (!session || session.lastContextWindow === null) {
     appendCommandMessage('No context data yet. Send a message first.');
     return;
   }
 
-  const usedK = state.lastTokenUsage ? Math.round(state.lastTokenUsage / 1000) : 0;
-  const totalK = Math.round(state.lastContextWindow / 1000);
-  const pct = state.lastTokenUsage ? Math.round((state.lastTokenUsage / state.lastContextWindow) * 100) : 0;
-  const remaining = state.lastContextWindow - (state.lastTokenUsage || 0);
+  const usedK = session.lastTokenUsage ? Math.round(session.lastTokenUsage / 1000) : 0;
+  const totalK = Math.round(session.lastContextWindow / 1000);
+  const pct = session.lastTokenUsage ? Math.round((session.lastTokenUsage / session.lastContextWindow) * 100) : 0;
+  const remaining = session.lastContextWindow - (session.lastTokenUsage || 0);
   const remainingK = Math.round(remaining / 1000);
 
   appendCommandMessage(`Context Window: ${totalK}k tokens total\nUsed: ${usedK}k (${pct}%)\nRemaining: ${remainingK}k`);
@@ -259,16 +444,18 @@ function handleModelCommand() {
 }
 
 // Append a command feedback message (styled differently from assistant messages)
-function appendCommandMessage(content) {
-  removeWelcome();
+function appendCommandMessage(content, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  removeWelcome(session);
   const div = document.createElement('div');
   div.className = 'message command-feedback';
   div.style.borderLeft = '3px solid var(--neon-cyan)';
   div.style.fontFamily = 'monospace';
   div.style.whiteSpace = 'pre-wrap';
   div.textContent = content;
-  messagesEl.appendChild(div);
-  scrollToBottom();
+  session.containerEl.appendChild(div);
+  scrollToBottom(session);
 }
 
 // Get all commands merged (builtin + global + project)
@@ -332,7 +519,13 @@ function showMain() {
   mainScreen.classList.remove('hidden');
   connectWebSocket();
   loadCustomCommands(); // Load global commands initially
-  restoreFromHash();
+
+  // Try to restore sessions from localStorage first
+  const restored = restoreSessionState();
+  if (!restored) {
+    // Fall back to hash restoration
+    restoreFromHash();
+  }
 }
 
 async function restoreFromHash() {
@@ -420,144 +613,178 @@ function connectWebSocket() {
 }
 
 function handleWsMessage(msg) {
+  let session;
+
+  if (msg.type === 'session-created') {
+    session = state.sessions.find(s => s.sessionId === null && s.isStreaming);
+    if (session) {
+      session.sessionId = msg.sessionId;
+      saveSessionState();
+    }
+  } else if (msg.sessionId) {
+    session = getSessionBySessionId(msg.sessionId);
+  } else {
+    session = getActiveSession();
+  }
+
+  if (!session && msg.type !== 'pong') {
+    console.warn('[WS] Message for unknown session:', msg.sessionId);
+    return;
+  }
+
+  const isInactive = session && state.sessions.indexOf(session) !== state.activeSessionIndex;
+
   switch (msg.type) {
     case 'session-created':
-      state.currentSessionId = msg.sessionId;
       break;
-      
     case 'claude-message':
-      handleClaudeMessage(msg.data);
+      handleClaudeMessage(msg.data, session);
+      if (isInactive) { session.hasUnread = true; renderSessionBar(); }
       break;
-      
     case 'claude-done':
-      finishStreaming();
+      finishStreaming(session);
+      if (isInactive) { session.hasUnread = true; renderSessionBar(); }
       break;
-      
     case 'token-usage':
-      updateTokenUsage(msg.used, msg.contextWindow);
+      updateTokenUsage(msg.used, msg.contextWindow, session);
       break;
-      
     case 'abort-result':
-      if (msg.success) finishStreaming();
+      if (msg.success) finishStreaming(session);
       break;
-      
+    case 'question-response-result':
+      break;
     case 'error':
-      appendSystemMessage(`Error: ${msg.message}`);
-      finishStreaming();
+      appendSystemMessage(`Error: ${msg.message}`, session);
+      finishStreaming(session);
+      if (isInactive) { session.hasUnread = true; renderSessionBar(); }
       break;
+    case 'pong':
+      break;
+    default:
+      console.debug('[WS] Unknown message type:', msg.type);
   }
 }
 
-function handleClaudeMessage(data) {
+function handleClaudeMessage(data, session) {
   if (!data) return;
-  
+  session = session || getActiveSession();
+  if (!session) return;
+
   if (data.type === 'text') {
-    state.pendingText += data.content || '';
-    updateStreamingMessage();
+    session.pendingText += data.content || '';
+    updateStreamingMessage(session);
     return;
   }
-  
+
   if (data.type === 'question') {
-    flushPendingText();
-    state.pendingQuestion = {
+    flushPendingText(session);
+    session.pendingQuestion = {
       id: data.id,
       questions: data.questions,
       selectedAnswers: {}
     };
-    renderQuestion(data);
+    renderQuestion(data, session);
     return;
   }
-  
+
   if (data.type === 'tool_use') {
-    flushPendingText();
-    appendToolMessage(data.tool, data.summary, data.id, 'running');
+    flushPendingText(session);
+    appendToolMessage(data.tool, data.summary, data.id, 'running', session);
     return;
   }
-  
+
   if (data.type === 'tool_result') {
-    updateToolResult(data.id, data.success, data.output);
+    updateToolResult(data.id, data.success, data.output, session);
     return;
   }
 }
 
-function flushPendingText() {
-  if (state.pendingText) {
-    const streamingEl = messagesEl.querySelector('.message.streaming');
+function flushPendingText(session) {
+  session = session || getActiveSession();
+  if (session && session.pendingText && session.containerEl) {
+    const streamingEl = session.containerEl.querySelector('.message.streaming');
     if (streamingEl) {
       streamingEl.classList.remove('streaming');
-      streamingEl.innerHTML = formatMarkdown(state.pendingText);
+      streamingEl.innerHTML = formatMarkdown(session.pendingText);
     }
-    state.pendingText = '';
+    session.pendingText = '';
   }
 }
 
-function updateStreamingMessage() {
-  let el = messagesEl.querySelector('.message.streaming');
+function updateStreamingMessage(session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+
+  let el = session.containerEl.querySelector('.message.streaming');
   if (!el) {
     el = document.createElement('div');
     el.className = 'message assistant streaming';
-    messagesEl.appendChild(el);
+    session.containerEl.appendChild(el);
   }
-  el.innerHTML = formatMarkdown(state.pendingText);
-  scrollToBottom();
+  el.innerHTML = formatMarkdown(session.pendingText);
+  scrollToBottom(session);
 }
 
-function finishStreaming() {
-  state.isStreaming = false;
-  abortBtn.classList.add('hidden');
-  chatInput.disabled = false;
-  sendBtn.disabled = false;
-  modeBtn.disabled = false;
-  attachBtn.disabled = false;
+function finishStreaming(session) {
+  session = session || getActiveSession();
+  if (!session) return;
+  session.isStreaming = false;
+  flushPendingText(session);
 
-  flushPendingText();
-
-  const streamingEl = messagesEl.querySelector('.message.streaming');
-  if (streamingEl) {
-    streamingEl.classList.remove('streaming');
+  // Only update UI controls if this is the active session
+  if (state.sessions.indexOf(session) === state.activeSessionIndex) {
+    abortBtn.classList.add('hidden');
+    chatInput.disabled = false;
+    sendBtn.disabled = false;
+    modeBtn.disabled = false;
+    attachBtn.disabled = false;
   }
-  
-  if (state.pendingQuestion) {
-    const questionBlock = messagesEl.querySelector('.message.question-block:not(.submitted)');
-    if (questionBlock) {
-      questionBlock.classList.add('cancelled');
-      const submitBtn = questionBlock.querySelector('.question-submit');
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Cancelled';
+
+  // Scope question cancellation to session container
+  if (session.containerEl) {
+    const streamingEl = session.containerEl.querySelector('.message.streaming');
+    if (streamingEl) streamingEl.classList.remove('streaming');
+    if (session.pendingQuestion) {
+      const questionBlock = session.containerEl.querySelector('.message.question-block:not(.submitted)');
+      if (questionBlock) {
+        questionBlock.classList.add('cancelled');
+        const submitBtn = questionBlock.querySelector('.question-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Cancelled'; }
+        questionBlock.querySelectorAll('.question-option').forEach(opt => { opt.style.pointerEvents = 'none'; });
+        questionBlock.querySelectorAll('.question-custom-input').forEach(input => { input.disabled = true; });
       }
-      questionBlock.querySelectorAll('.question-option').forEach(opt => {
-        opt.style.pointerEvents = 'none';
-      });
-      questionBlock.querySelectorAll('.question-custom-input').forEach(input => {
-        input.disabled = true;
-      });
+      session.pendingQuestion = null;
     }
-    state.pendingQuestion = null;
   }
 }
 
-function appendMessage(role, content) {
-  removeWelcome();
+function appendMessage(role, content, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  removeWelcome(session);
   const div = document.createElement('div');
   div.className = `message ${role}`;
   div.innerHTML = role === 'user' ? escapeHtml(content) : formatMarkdown(content);
-  messagesEl.appendChild(div);
-  scrollToBottom();
+  session.containerEl.appendChild(div);
+  scrollToBottom(session);
 }
 
-function appendSystemMessage(content) {
-  removeWelcome();
+function appendSystemMessage(content, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  removeWelcome(session);
   const div = document.createElement('div');
   div.className = 'message assistant';
   div.style.borderLeft = '3px solid var(--error)';
   div.textContent = content;
-  messagesEl.appendChild(div);
-  scrollToBottom();
+  session.containerEl.appendChild(div);
+  scrollToBottom(session);
 }
 
-function appendToolMessage(tool, summary, id, status) {
-  removeWelcome();
+function appendToolMessage(tool, summary, id, status, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  removeWelcome(session);
   const div = document.createElement('div');
   div.className = `message tool ${status}`;
   div.dataset.toolId = id || '';
@@ -568,28 +795,31 @@ function appendToolMessage(tool, summary, id, status) {
     </div>
     <div class="tool-summary">${escapeHtml(summary || '')}</div>
   `;
-  messagesEl.appendChild(div);
-  scrollToBottom();
+  session.containerEl.appendChild(div);
+  scrollToBottom(session);
 }
 
-function updateToolResult(id, success, output) {
-  const toolMsgs = messagesEl.querySelectorAll('.message.tool');
+function updateToolResult(id, success, output, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+
+  const toolMsgs = session.containerEl.querySelectorAll('.message.tool');
   let target = null;
-  
+
   if (id) {
-    target = messagesEl.querySelector(`.message.tool[data-tool-id="${id}"]`);
+    target = session.containerEl.querySelector(`.message.tool[data-tool-id="${id}"]`);
   }
   if (!target && toolMsgs.length > 0) {
     target = toolMsgs[toolMsgs.length - 1];
   }
-  
+
   if (target) {
     target.classList.remove('running');
     target.classList.add(success ? 'success' : 'error');
-    
+
     const statusEl = target.querySelector('.tool-status');
     if (statusEl) statusEl.textContent = success ? 'done' : 'failed';
-    
+
     if (output && output.trim()) {
       const outputEl = document.createElement('div');
       outputEl.className = 'tool-output';
@@ -597,28 +827,30 @@ function updateToolResult(id, success, output) {
       target.appendChild(outputEl);
     }
   }
-  scrollToBottom();
+  scrollToBottom(session);
 }
 
-function renderQuestion(data) {
-  removeWelcome();
-  
+function renderQuestion(data, session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  removeWelcome(session);
+
   const div = document.createElement('div');
   div.className = 'message question-block';
   div.dataset.questionId = data.id;
-  
+
   let html = '';
-  
+
   data.questions.forEach((q, qIndex) => {
     const isMultiple = q.multiSelect || q.multiple || false;
-    
+
     html += `
       <div class="question-group" data-question-index="${qIndex}" data-multiple="${isMultiple}">
         <div class="question-header">${escapeHtml(q.header || '')}</div>
         <div class="question-text">${escapeHtml(q.question)}</div>
         <div class="question-options">
     `;
-    
+
     if (q.options && q.options.length > 0) {
       q.options.forEach(opt => {
         html += `
@@ -629,7 +861,7 @@ function renderQuestion(data) {
         `;
       });
     }
-    
+
     html += `
         </div>
         <div class="question-custom-container">
@@ -638,25 +870,25 @@ function renderQuestion(data) {
       </div>
     `;
   });
-  
+
   html += `
     <button class="question-submit" disabled>Submit Answer</button>
   `;
-  
+
   div.innerHTML = html;
-  messagesEl.appendChild(div);
-  
+  session.containerEl.appendChild(div);
+
   div.querySelectorAll('.question-option').forEach(opt => {
     opt.addEventListener('click', () => handleOptionSelect(opt));
   });
-  
+
   div.querySelectorAll('.question-custom-input').forEach(input => {
     input.addEventListener('input', () => handleCustomInputChange(input));
   });
-  
+
   div.querySelector('.question-submit').addEventListener('click', submitQuestionResponse);
-  
-  scrollToBottom();
+
+  scrollToBottom(session);
 }
 
 function handleOptionSelect(optionEl) {
@@ -664,16 +896,17 @@ function handleOptionSelect(optionEl) {
   const label = optionEl.dataset.label;
   const questionGroup = optionEl.closest('.question-group');
   const isMultiple = questionGroup.dataset.multiple === 'true';
-  
-  if (!state.pendingQuestion) return;
-  
-  if (!state.pendingQuestion.selectedAnswers[qIndex]) {
-    state.pendingQuestion.selectedAnswers[qIndex] = [];
+
+  const session = getActiveSession();
+  if (!session || !session.pendingQuestion) return;
+
+  if (!session.pendingQuestion.selectedAnswers[qIndex]) {
+    session.pendingQuestion.selectedAnswers[qIndex] = [];
   }
-  
-  const answers = state.pendingQuestion.selectedAnswers[qIndex];
+
+  const answers = session.pendingQuestion.selectedAnswers[qIndex];
   const existingIndex = answers.indexOf(label);
-  
+
   if (isMultiple) {
     if (existingIndex >= 0) {
       answers.splice(existingIndex, 1);
@@ -686,15 +919,15 @@ function handleOptionSelect(optionEl) {
     questionGroup.querySelectorAll('.question-option').forEach(opt => {
       opt.classList.remove('selected');
     });
-    state.pendingQuestion.selectedAnswers[qIndex] = [label];
+    session.pendingQuestion.selectedAnswers[qIndex] = [label];
     optionEl.classList.add('selected');
   }
-  
+
   const customInput = questionGroup.querySelector('.question-custom-input');
   if (customInput) {
     customInput.value = '';
   }
-  
+
   updateSubmitButtonState();
 }
 
@@ -702,52 +935,56 @@ function handleCustomInputChange(inputEl) {
   const qIndex = parseInt(inputEl.dataset.qindex);
   const value = inputEl.value.trim();
   const questionGroup = inputEl.closest('.question-group');
-  
-  if (!state.pendingQuestion) return;
-  
+
+  const session = getActiveSession();
+  if (!session || !session.pendingQuestion) return;
+
   questionGroup.querySelectorAll('.question-option').forEach(opt => {
     opt.classList.remove('selected');
   });
-  
+
   if (value) {
-    state.pendingQuestion.selectedAnswers[qIndex] = [value];
+    session.pendingQuestion.selectedAnswers[qIndex] = [value];
   } else {
-    delete state.pendingQuestion.selectedAnswers[qIndex];
+    delete session.pendingQuestion.selectedAnswers[qIndex];
   }
-  
+
   updateSubmitButtonState();
 }
 
 function updateSubmitButtonState() {
-  if (!state.pendingQuestion) return;
-  const questionBlock = messagesEl.querySelector(
-    `.message.question-block[data-question-id="${state.pendingQuestion.id}"]`
+  const session = getActiveSession();
+  if (!session || !session.pendingQuestion || !session.containerEl) return;
+
+  const questionBlock = session.containerEl.querySelector(
+    `.message.question-block[data-question-id="${session.pendingQuestion.id}"]`
   );
   if (!questionBlock) return;
-  
+
   const submitBtn = questionBlock.querySelector('.question-submit');
-  const totalQuestions = state.pendingQuestion.questions.length;
-  const answeredQuestions = Object.keys(state.pendingQuestion.selectedAnswers).filter(
-    key => state.pendingQuestion.selectedAnswers[key]?.length > 0
+  const totalQuestions = session.pendingQuestion.questions.length;
+  const answeredQuestions = Object.keys(session.pendingQuestion.selectedAnswers).filter(
+    key => session.pendingQuestion.selectedAnswers[key]?.length > 0
   ).length;
-  
+
   submitBtn.disabled = answeredQuestions < totalQuestions;
 }
 
 function submitQuestionResponse() {
-  if (!state.pendingQuestion || !state.currentSessionId) return;
-  
-  const answers = state.pendingQuestion.selectedAnswers;
-  
+  const session = getActiveSession();
+  if (!session || !session.pendingQuestion || !session.sessionId) return;
+
+  const answers = session.pendingQuestion.selectedAnswers;
+
   state.ws.send(JSON.stringify({
     type: 'question-response',
-    sessionId: state.currentSessionId,
-    toolUseId: state.pendingQuestion.id,
+    sessionId: session.sessionId,
+    toolUseId: session.pendingQuestion.id,
     answers: answers
   }));
 
-  const questionBlock = messagesEl.querySelector(
-    `.message.question-block[data-question-id="${state.pendingQuestion.id}"]`
+  const questionBlock = session.containerEl?.querySelector(
+    `.message.question-block[data-question-id="${session.pendingQuestion.id}"]`
   );
   if (questionBlock) {
     questionBlock.classList.add('submitted');
@@ -763,41 +1000,48 @@ function submitQuestionResponse() {
       input.disabled = true;
     });
   }
-  
-  state.pendingQuestion = null;
+
+  session.pendingQuestion = null;
 }
 
-function removeWelcome() {
-  const welcome = messagesEl.querySelector('.welcome-message');
+function removeWelcome(session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  const welcome = session.containerEl.querySelector('.welcome-message');
   if (welcome) welcome.remove();
 }
 
-function clearMessages() {
-  messagesEl.innerHTML = `
+function clearMessages(session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
+  session.containerEl.innerHTML = `
     <div class="welcome-message">
       <h2>New Session</h2>
       <p>Start typing to chat with Claude.</p>
     </div>
   `;
-  state.pendingText = '';
+  session.pendingText = '';
 }
 
-function scrollToBottom() {
+function scrollToBottom(session) {
+  session = session || getActiveSession();
+  if (!session?.containerEl) return;
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    session.containerEl.scrollTop = session.containerEl.scrollHeight;
   });
 }
 
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const content = chatInput.value.trim();
-  if (!content || state.isStreaming) return;
-  
-  if (!state.currentProject) {
+  const session = getActiveSession();
+  if (!content || session?.isStreaming) return;
+
+  if (!session) {
     alert('Please select a project first (tap the menu icon)');
     return;
   }
-  
+
   sendMessage(content);
 });
 
@@ -812,20 +1056,26 @@ function sendMessage(content) {
     return; // Don't send to Claude
   }
 
+  const session = getActiveSession();
+  if (!session) {
+    appendCommandMessage('Please create or select a session first.');
+    return;
+  }
+
   const mode = MODES[state.modeIndex];
 
   const message = {
     type: 'chat',
     content: content,
     mode: mode.name,
-    projectPath: state.currentProject.path,
-    sessionId: state.currentSessionId,
-    isNewSession: !state.currentSessionId
+    projectPath: session.project.path,
+    sessionId: session.sessionId,
+    isNewSession: !session.sessionId
   };
 
   // Add attachments if present
-  if (state.attachments.length > 0) {
-    message.attachments = state.attachments.map(att => ({
+  if (session.attachments.length > 0) {
+    message.attachments = session.attachments.map(att => ({
       type: att.type,
       name: att.name,
       data: att.data,
@@ -836,17 +1086,17 @@ function sendMessage(content) {
   state.ws.send(JSON.stringify(message));
 
   // Show attachments in user message display
-  const displayContent = formatUserMessageWithAttachments(content, state.attachments);
-  appendMessage('user', displayContent);
+  const displayContent = formatUserMessageWithAttachments(content, session.attachments);
+  appendMessage('user', displayContent, session);
 
   // Clear attachments after sending
-  state.attachments = [];
+  session.attachments = [];
   renderAttachmentPreview();
 
   chatInput.value = '';
   chatInput.style.height = 'auto';
 
-  state.isStreaming = true;
+  session.isStreaming = true;
   abortBtn.classList.remove('hidden');
   chatInput.disabled = true;
   sendBtn.disabled = true;
@@ -883,6 +1133,34 @@ chatInput.addEventListener('input', handleFileMentionInput);
 chatInput.addEventListener('blur', () => {
   setTimeout(hideSlashCommands, 150);
   setTimeout(hideFileMentions, 150);
+});
+
+// Session tab event delegation
+sessionTabsEl.addEventListener('click', (e) => {
+  const closeBtn = e.target.closest('.close-tab');
+  if (closeBtn) {
+    const tab = closeBtn.closest('.session-tab');
+    closeSession(parseInt(tab.dataset.index));
+    return;
+  }
+  const tab = e.target.closest('.session-tab');
+  if (tab) {
+    switchToSession(parseInt(tab.dataset.index));
+  }
+});
+
+// Keyboard shortcuts for session switching (Ctrl+1 through Ctrl+5)
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+    const num = parseInt(e.key);
+    if (num >= 1 && num <= MAX_SESSIONS) {
+      e.preventDefault();
+      const index = num - 1;
+      if (index < state.sessions.length) {
+        switchToSession(index);
+      }
+    }
+  }
 });
 
 // Mobile keyboard handling - scroll input into view when focused
@@ -926,7 +1204,9 @@ function handleSlashCommandInput() {
 }
 
 function renderSlashCommands(commands) {
-  state.slashCommandSelectedIndex = 0;
+  const session = getActiveSession();
+  if (session) session.slashCommandSelectedIndex = 0;
+
   slashCommandsEl.innerHTML = commands.map((cmd, i) => {
     const sourceClass = `source-${cmd.source || 'builtin'}`;
     const sourceLabel = cmd.source === 'global' ? 'global' : cmd.source === 'project' ? 'project' : '';
@@ -956,50 +1236,67 @@ function showSlashCommands() {
 
 function hideSlashCommands() {
   slashCommandsEl.classList.add('hidden');
-  state.slashCommandSelectedIndex = -1;
+  const session = getActiveSession();
+  if (session) session.slashCommandSelectedIndex = -1;
 }
 
 function handleSlashCommandKeydown(e) {
+  const session = getActiveSession();
+  if (!session) return false;
+
   const items = slashCommandsEl.querySelectorAll('.slash-command');
   if (items.length === 0) return false;
-  
+
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    state.slashCommandSelectedIndex = Math.min(state.slashCommandSelectedIndex + 1, items.length - 1);
+    session.slashCommandSelectedIndex = Math.min(session.slashCommandSelectedIndex + 1, items.length - 1);
     updateSlashCommandSelection(items);
     return true;
   }
-  
+
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    state.slashCommandSelectedIndex = Math.max(state.slashCommandSelectedIndex - 1, 0);
+    session.slashCommandSelectedIndex = Math.max(session.slashCommandSelectedIndex - 1, 0);
     updateSlashCommandSelection(items);
     return true;
   }
-  
+
   if (e.key === 'Enter' || e.key === 'Tab') {
     e.preventDefault();
-    const selected = items[state.slashCommandSelectedIndex];
+    const selected = items[session.slashCommandSelectedIndex];
     if (selected) {
-      insertSlashCommand(selected.dataset.command);
+      const command = selected.dataset.command;
+      // If it's a local builtin command and Enter (not Tab), execute immediately
+      if (e.key === 'Enter' && isLocalBuiltinCommand(command)) {
+        hideSlashCommands();
+        const { command: cmd, args } = parseCommand(command);
+        executeBuiltinCommand(cmd, args);
+        chatInput.value = '';
+        chatInput.style.height = 'auto';
+        return true;
+      }
+      insertSlashCommand(command);
     }
     return true;
   }
-  
+
   if (e.key === 'Escape') {
     e.preventDefault();
     hideSlashCommands();
     return true;
   }
-  
+
   return false;
 }
 
 function updateSlashCommandSelection(items) {
+  const session = getActiveSession();
+  if (!session) return;
+
   items.forEach((item, i) => {
-    item.classList.toggle('selected', i === state.slashCommandSelectedIndex);
+    item.classList.toggle('selected', i === session.slashCommandSelectedIndex);
   });
-  items[state.slashCommandSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+  items[session.slashCommandSelectedIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 function insertSlashCommand(command) {
@@ -1011,6 +1308,9 @@ function insertSlashCommand(command) {
 
 // File Mention Functions
 function handleFileMentionInput() {
+  const session = getActiveSession();
+  if (!session) return;
+
   const value = chatInput.value;
   const cursorPos = chatInput.selectionStart;
   const textBeforeCursor = value.slice(0, cursorPos);
@@ -1037,26 +1337,27 @@ function handleFileMentionInput() {
     return;
   }
 
-  state.fileMentionQuery = textAfterAt;
-  state.fileMentionStartPos = lastAtIndex;
+  session.fileMentionQuery = textAfterAt;
+  session.fileMentionStartPos = lastAtIndex;
 
   // Debounce the API call
-  clearTimeout(state.fileMentionDebounceTimer);
-  state.fileMentionDebounceTimer = setTimeout(() => {
-    fetchFileMentions(state.fileMentionQuery);
+  clearTimeout(session.fileMentionDebounceTimer);
+  session.fileMentionDebounceTimer = setTimeout(() => {
+    fetchFileMentions(session.fileMentionQuery);
   }, 300);
 }
 
 async function fetchFileMentions(query) {
+  const session = getActiveSession();
   // Check if project is selected
-  if (!state.currentProject) {
+  if (!session) {
     renderFileMentions([], 'no-project');
     showFileMentions();
     return;
   }
 
   try {
-    const { files } = await api(`/api/projects/${encodeURIComponent(state.currentProject.name)}/files/search?q=${encodeURIComponent(query)}`);
+    const { files } = await api(`/api/projects/${encodeURIComponent(session.project.name)}/files/search?q=${encodeURIComponent(query)}`);
     renderFileMentions(files);
     showFileMentions();
   } catch (err) {
@@ -1065,10 +1366,11 @@ async function fetchFileMentions(query) {
   }
 }
 
-function renderFileMentions(files, state = 'normal') {
-  state.fileMentionSelectedIndex = 0;
+function renderFileMentions(files, displayState = 'normal') {
+  const session = getActiveSession();
+  if (session) session.fileMentionSelectedIndex = 0;
 
-  if (state === 'no-project') {
+  if (displayState === 'no-project') {
     fileMentionsEl.innerHTML = '<div class="file-mention-no-project">Select a project to search files</div>';
     return;
   }
@@ -1131,33 +1433,39 @@ function showFileMentions() {
 
 function hideFileMentions() {
   fileMentionsEl.classList.add('hidden');
-  state.fileMentionSelectedIndex = 0;
-  state.fileMentionQuery = '';
-  state.fileMentionStartPos = -1;
-  clearTimeout(state.fileMentionDebounceTimer);
+  const session = getActiveSession();
+  if (session) {
+    session.fileMentionSelectedIndex = 0;
+    session.fileMentionQuery = '';
+    session.fileMentionStartPos = -1;
+    clearTimeout(session.fileMentionDebounceTimer);
+  }
 }
 
 function handleFileMentionKeydown(e) {
+  const session = getActiveSession();
+  if (!session) return false;
+
   const items = fileMentionsEl.querySelectorAll('.file-mention-item');
   if (items.length === 0) return false;
 
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    state.fileMentionSelectedIndex = Math.min(state.fileMentionSelectedIndex + 1, items.length - 1);
+    session.fileMentionSelectedIndex = Math.min(session.fileMentionSelectedIndex + 1, items.length - 1);
     updateFileMentionSelection(items);
     return true;
   }
 
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    state.fileMentionSelectedIndex = Math.max(state.fileMentionSelectedIndex - 1, 0);
+    session.fileMentionSelectedIndex = Math.max(session.fileMentionSelectedIndex - 1, 0);
     updateFileMentionSelection(items);
     return true;
   }
 
   if (e.key === 'Enter' || e.key === 'Tab') {
     e.preventDefault();
-    const selected = items[state.fileMentionSelectedIndex];
+    const selected = items[session.fileMentionSelectedIndex];
     if (selected) {
       selectFileMention(selected.dataset.file);
     }
@@ -1174,15 +1482,21 @@ function handleFileMentionKeydown(e) {
 }
 
 function updateFileMentionSelection(items) {
+  const session = getActiveSession();
+  if (!session) return;
+
   items.forEach((item, i) => {
-    item.classList.toggle('selected', i === state.fileMentionSelectedIndex);
+    item.classList.toggle('selected', i === session.fileMentionSelectedIndex);
   });
-  items[state.fileMentionSelectedIndex]?.scrollIntoView({ block: 'nearest' });
+  items[session.fileMentionSelectedIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 function selectFileMention(filePath) {
+  const session = getActiveSession();
+  if (!session) return;
+
   const value = chatInput.value;
-  const before = value.slice(0, state.fileMentionStartPos);
+  const before = value.slice(0, session.fileMentionStartPos);
   const after = value.slice(chatInput.selectionStart);
   const formatted = `@"${filePath}"`;
 
@@ -1190,7 +1504,7 @@ function selectFileMention(filePath) {
   chatInput.focus();
 
   // Set cursor position after the inserted text
-  const newCursorPos = state.fileMentionStartPos + formatted.length;
+  const newCursorPos = session.fileMentionStartPos + formatted.length;
   chatInput.setSelectionRange(newCursorPos, newCursorPos);
 
   hideFileMentions();
@@ -1219,11 +1533,20 @@ function updateModeButton() {
 
 modeBtn.addEventListener('click', cycleMode);
 
+newSessionTabBtn.addEventListener('click', () => {
+  if (state.sessions.length >= MAX_SESSIONS) {
+    alert(`Maximum ${MAX_SESSIONS} sessions reached`);
+    return;
+  }
+  openSidebar();
+});
+
 abortBtn.addEventListener('click', () => {
-  if (state.currentSessionId && state.isStreaming) {
+  const session = getActiveSession();
+  if (session && session.sessionId && session.isStreaming) {
     state.ws.send(JSON.stringify({
       type: 'abort',
-      sessionId: state.currentSessionId
+      sessionId: session.sessionId
     }));
   }
 });
@@ -1321,8 +1644,26 @@ async function searchProjects(query) {
 }
 
 async function selectProject(name, path, displayName, skipHashUpdate = false) {
-  state.currentProject = { name, path, displayName };
-  state.currentSessionId = null;
+  const project = { name, path, displayName };
+
+  // Check if we can add another session
+  if (state.sessions.length >= MAX_SESSIONS) {
+    alert(`Maximum ${MAX_SESSIONS} sessions allowed`);
+    return;
+  }
+
+  // Create a new session for this project
+  const session = createSession(project, null);
+  state.sessions.push(session);
+  createSessionContainer(session);
+
+  // Switch to the new session (deactivate current container first since switchToSession
+  // needs activeSessionIndex to find the old session)
+  const prevSession = getActiveSession();
+  if (prevSession) prevSession.containerEl.classList.remove('active');
+  state.activeSessionIndex = -1; // Reset to force switch
+  switchToSession(state.sessions.length - 1);
+
   projectNameEl.textContent = displayName;
   if (!skipHashUpdate) updateHash(name);
 
@@ -1334,9 +1675,12 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
   sessionsContainer.innerHTML = '<div class="loading">Loading sessions</div>';
   newSessionBtn.classList.remove('hidden');
 
+  // Initialize container with welcome message
+  clearMessages(session);
+
   try {
     const sessions = await api(`/api/projects/${encodeURIComponent(name)}/sessions`);
-    
+
     if (sessions.length === 0) {
       sessionsContainer.innerHTML = '<div class="empty-state">No sessions yet</div>';
     } else {
@@ -1346,7 +1690,7 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
           <span class="session-date">${formatDate(s.lastModified)}</span>
         </div>
       `).join('');
-      
+
       sessionsContainer.querySelectorAll('.session-item').forEach(el => {
         el.addEventListener('click', () => resumeSession(el.dataset.id));
       });
@@ -1354,49 +1698,61 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
   } catch (err) {
     sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
   }
+
+  saveSessionState();
 }
 
 async function resumeSession(sessionId, skipHashUpdate = false) {
-  state.currentSessionId = sessionId;
-  if (!skipHashUpdate) updateHash(state.currentProject.name, sessionId);
-  clearMessages();
-  messagesEl.innerHTML = '<div class="loading">Loading history</div>';
+  const session = getActiveSession();
+  if (!session) return;
+
+  session.sessionId = sessionId;
+  if (!skipHashUpdate) updateHash(session.project.name, sessionId);
+  clearMessages(session);
+  if (session.containerEl) {
+    session.containerEl.innerHTML = '<div class="loading">Loading history</div>';
+  }
   closeSidebar();
-  
+
   try {
-    const projectName = state.currentProject.name;
+    const projectName = session.project.name;
     const { messages } = await api(`/api/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
-    
-    messagesEl.innerHTML = '';
-    
+
+    if (session.containerEl) session.containerEl.innerHTML = '';
+
     if (messages.length === 0) {
-      messagesEl.innerHTML = `
-        <div class="welcome-message">
-          <h2>Session Resumed</h2>
-          <p>Continue your conversation with Claude.</p>
-        </div>
-      `;
+      if (session.containerEl) {
+        session.containerEl.innerHTML = `
+          <div class="welcome-message">
+            <h2>Session Resumed</h2>
+            <p>Continue your conversation with Claude.</p>
+          </div>
+        `;
+      }
     } else {
       for (const msg of messages) {
         if (msg.role === 'user') {
-          appendMessage('user', msg.content);
+          appendMessage('user', msg.content, session);
         } else if (msg.role === 'assistant') {
-          appendMessage('assistant', msg.content);
+          appendMessage('assistant', msg.content, session);
         } else if (msg.role === 'tool') {
-          appendToolMessage(msg.tool, getToolSummaryFromInput(msg.tool, msg.input), null, 'success');
+          appendToolMessage(msg.tool, getToolSummaryFromInput(msg.tool, msg.input), null, 'success', session);
         }
       }
     }
   } catch (err) {
-    messagesEl.innerHTML = `
-      <div class="welcome-message">
-        <h2>Session Resumed</h2>
-        <p>Could not load history. Continue your conversation.</p>
-      </div>
-    `;
+    if (session.containerEl) {
+      session.containerEl.innerHTML = `
+        <div class="welcome-message">
+          <h2>Session Resumed</h2>
+          <p>Could not load history. Continue your conversation.</p>
+        </div>
+      `;
+    }
   }
-  
+
   enableChat();
+  saveSessionState();
 }
 
 function getToolSummaryFromInput(tool, input) {
@@ -1413,11 +1769,15 @@ function getToolSummaryFromInput(tool, input) {
 }
 
 newSessionBtn.addEventListener('click', () => {
-  state.currentSessionId = null;
-  updateHash(state.currentProject.name);
-  clearMessages();
+  const session = getActiveSession();
+  if (!session) return;
+
+  session.sessionId = null;
+  updateHash(session.project.name);
+  clearMessages(session);
   enableChat();
   closeSidebar();
+  saveSessionState();
 });
 
 backToProjectsBtn.addEventListener('click', () => {
@@ -1435,23 +1795,33 @@ function enableChat() {
   chatInput.focus();
 }
 
-function updateTokenUsage(used, total) {
-  // Store in state for /tokens and /context commands
-  state.lastTokenUsage = used;
-  state.lastContextWindow = total;
+function updateTokenUsage(used, total, session) {
+  session = session || getActiveSession();
+  if (session) {
+    session.lastTokenUsage = used;
+    session.lastContextWindow = total;
+  }
 
-  const usedK = Math.round(used / 1000);
-  const totalK = Math.round(total / 1000);
-  const pct = Math.round((used / total) * 100);
-  tokenUsageEl.textContent = `${usedK}k / ${totalK}k (${pct}%)`;
-  tokenUsageEl.classList.remove('hidden');
+  // Only update DOM if this is the active session
+  if (session && state.sessions.indexOf(session) === state.activeSessionIndex) {
+    if (!used || !total) {
+      tokenUsageEl.textContent = '';
+      tokenUsageEl.classList.add('hidden');
+      return;
+    }
+    const usedK = Math.round(used / 1000);
+    const totalK = Math.round(total / 1000);
+    const pct = Math.round((used / total) * 100);
+    tokenUsageEl.textContent = `${usedK}k / ${totalK}k (${pct}%)`;
+    tokenUsageEl.classList.remove('hidden');
 
-  if (pct > 80) {
-    tokenUsageEl.style.color = 'var(--warning)';
-  } else if (pct > 95) {
-    tokenUsageEl.style.color = 'var(--error)';
-  } else {
-    tokenUsageEl.style.color = '';
+    if (pct > 80) {
+      tokenUsageEl.style.color = 'var(--warning)';
+    } else if (pct > 95) {
+      tokenUsageEl.style.color = 'var(--error)';
+    } else {
+      tokenUsageEl.style.color = '';
+    }
   }
 }
 
@@ -1532,7 +1902,18 @@ async function api(url, body = null) {
 
 window.addEventListener('hashchange', () => {
   if (state.token) {
-    restoreFromHash();
+    const session = getActiveSession();
+    const route = parseHash();
+
+    // Guard against redundant reloads - only reload if hash differs from current session
+    if (!session || !route) {
+      restoreFromHash();
+      return;
+    }
+
+    if (session.project.name !== route.projectName || session.sessionId !== route.sessionId) {
+      restoreFromHash();
+    }
   }
 });
 
@@ -1606,7 +1987,10 @@ async function uploadFile(file) {
 
 // Process and add a file as an attachment
 async function processAndAddAttachment(file) {
-  if (state.attachments.length >= MAX_ATTACHMENTS) {
+  const session = getActiveSession();
+  if (!session) return;
+
+  if (session.attachments.length >= MAX_ATTACHMENTS) {
     alert(`Maximum ${MAX_ATTACHMENTS} attachments allowed`);
     return;
   }
@@ -1635,7 +2019,7 @@ async function processAndAddAttachment(file) {
       attachment.preview = truncateText(result.content, 100);
     }
 
-    state.attachments.push(attachment);
+    session.attachments.push(attachment);
     renderAttachmentPreview();
     chatInput.focus();
   } catch (err) {
@@ -1646,14 +2030,15 @@ async function processAndAddAttachment(file) {
 
 // Render attachment preview area
 function renderAttachmentPreview() {
-  if (state.attachments.length === 0) {
+  const session = getActiveSession();
+  if (!session || session.attachments.length === 0) {
     attachmentPreviewEl.classList.add('hidden');
     attachmentPreviewEl.innerHTML = '';
     return;
   }
 
   attachmentPreviewEl.classList.remove('hidden');
-  attachmentPreviewEl.innerHTML = state.attachments.map(att => {
+  attachmentPreviewEl.innerHTML = session.attachments.map(att => {
     if (att.type === 'image') {
       return `
         <div class="attachment-item image" data-id="${att.id}">
@@ -1676,8 +2061,11 @@ function renderAttachmentPreview() {
 
 // Remove attachment by ID via event delegation
 function removeAttachment(id) {
-  state.attachments = state.attachments.filter(att => att.id !== id);
-  renderAttachmentPreview();
+  const session = getActiveSession();
+  if (session) {
+    session.attachments = session.attachments.filter(att => att.id !== id);
+    renderAttachmentPreview();
+  }
 }
 
 // Event delegation for attachment removal
@@ -1708,7 +2096,8 @@ function formatUserMessageWithAttachments(content, attachments) {
 // Paste event handler
 document.addEventListener('paste', async (e) => {
   // Only handle if chat is enabled and a project is selected
-  if (!state.currentProject || chatInput.disabled) return;
+  const session = getActiveSession();
+  if (!session || chatInput.disabled) return;
 
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -1752,7 +2141,8 @@ let dragCounter = 0;
 
 document.addEventListener('dragenter', (e) => {
   e.preventDefault();
-  if (!state.currentProject || chatInput.disabled) return;
+  const session = getActiveSession();
+  if (!session || chatInput.disabled) return;
 
   // Check if dragging files
   if (!e.dataTransfer?.types?.includes('Files')) return;
@@ -1780,7 +2170,8 @@ document.addEventListener('drop', async (e) => {
   dragCounter = 0;
   dropZoneOverlay.classList.add('hidden');
 
-  if (!state.currentProject || chatInput.disabled) return;
+  const session = getActiveSession();
+  if (!session || chatInput.disabled) return;
 
   const files = Array.from(e.dataTransfer?.files || []);
   for (const file of files) {
