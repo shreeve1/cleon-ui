@@ -13,7 +13,7 @@ import rateLimit from 'express-rate-limit';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
-import { handleChat, handleAbort, handleQuestionResponse } from './claude.js';
+import { handleChat, handleAbort, handleQuestionResponse, isSessionActive, resubscribeSession } from './claude.js';
 import { getAllCommands } from './commands.js';
 import { processUpload, validateFile } from './uploads.js';
 import logger from './logger.js';
@@ -224,6 +224,23 @@ wss.on('connection', (ws, req) => {
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
+          break;
+
+        case 'check-active':
+          ws.send(JSON.stringify({
+            type: 'session-active',
+            sessionId: msg.sessionId,
+            active: isSessionActive(msg.sessionId)
+          }));
+          break;
+
+        case 'subscribe':
+          const subscribed = resubscribeSession(msg.sessionId, ws);
+          ws.send(JSON.stringify({
+            type: 'subscribe-result',
+            sessionId: msg.sessionId,
+            success: subscribed
+          }));
           break;
 
         default:

@@ -30,7 +30,7 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
     // Transform and forward message
     const transformed = transformMessage(message);
     if (transformed) {
-      sendMessage(ws, {
+      sendMessage(sessionInfo.ws, {
         type: 'claude-message',
         sessionId: message.session_id,
         data: transformed
@@ -41,7 +41,7 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
     if (message.type === 'result' && message.modelUsage) {
       const usage = extractTokenUsage(message.modelUsage);
       if (usage) {
-        sendMessage(ws, {
+        sendMessage(sessionInfo.ws, {
           type: 'token-usage',
           sessionId: message.session_id,
           ...usage
@@ -101,8 +101,10 @@ export async function handleChat(msg, ws) {
       prompt += textAttachments.join('');
     }
   }
-  
 
+
+  // Create session info object (mutable WS reference for reconnection support)
+  const sessionInfo = { queryInstance: null, ws };
 
   const options = {
     cwd: projectPath,
@@ -116,7 +118,7 @@ export async function handleChat(msg, ws) {
         console.log(`[Claude] AskUserQuestion intercepted - toolUseId: ${toolUseID}`);
 
         // Send question to frontend
-        sendMessage(ws, {
+        sendMessage(sessionInfo.ws, {
           type: 'claude-message',
           sessionId: currentSessionId,
           data: {
@@ -197,11 +199,8 @@ export async function handleChat(msg, ws) {
       await queryInstance.setPermissionMode(permissionMode);
     }
 
-    // Create session info object
-    const sessionInfo = {
-      queryInstance,
-      ws
-    };
+    // Assign queryInstance to sessionInfo
+    sessionInfo.queryInstance = queryInstance;
 
     // Track for abort
     if (currentSessionId) {
@@ -213,7 +212,7 @@ export async function handleChat(msg, ws) {
       if (!currentSessionId) {
         currentSessionId = sid;
         activeSessions.set(currentSessionId, sessionInfo);
-        sendMessage(ws, {
+        sendMessage(sessionInfo.ws, {
           type: 'session-created',
           sessionId: currentSessionId
         });
@@ -222,14 +221,14 @@ export async function handleChat(msg, ws) {
 
     // Stream complete
     console.log(`[Claude] Query complete - session: ${currentSessionId}`);
-    sendMessage(ws, {
+    sendMessage(sessionInfo.ws, {
       type: 'claude-done',
       sessionId: currentSessionId
     });
 
   } catch (err) {
     console.error('[Claude] Query error:', err);
-    sendMessage(ws, {
+    sendMessage(sessionInfo.ws, {
       type: 'error',
       sessionId: currentSessionId || msg.sessionId || null,
       message: err.message || 'Query failed'
@@ -283,6 +282,17 @@ export async function handleAbort(sessionId) {
  */
 export function isSessionActive(sessionId) {
   return activeSessions.has(sessionId);
+}
+
+/**
+ * Resubscribe to an active session with a new WebSocket
+ * Returns true if session found and updated, false otherwise
+ */
+export function resubscribeSession(sessionId, newWs) {
+  const sessionInfo = activeSessions.get(sessionId);
+  if (!sessionInfo) return false;
+  sessionInfo.ws = newWs;
+  return true;
 }
 
 /**

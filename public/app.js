@@ -18,7 +18,9 @@ const state = {
   modeIndex: 2,
   currentMode: 'bypass',
   searchTimeout: null,
-  customCommands: []
+  customCommands: [],
+  sessionsRestored: false,
+  forceNewTab: false
 };
 
 // Session object factory
@@ -34,6 +36,7 @@ function createSession(project, sessionId = null) {
     lastTokenUsage: null,
     lastContextWindow: null,
     hasUnread: false,
+    needsHistoryLoad: false,
     containerEl: null,                 // DOM reference
     // File mention state (per-session)
     fileMentionSelectedIndex: 0,
@@ -98,6 +101,11 @@ function switchToSession(index) {
 
   newSession.containerEl.classList.add('active');
   newSession.hasUnread = false;
+
+  // Lazy-load message history for restored sessions
+  if (newSession.needsHistoryLoad) {
+    loadSessionHistory(newSession);
+  }
 
   if (newSession.isStreaming) {
     abortBtn.classList.remove('hidden');
@@ -174,7 +182,7 @@ function saveSessionState() {
   localStorage.setItem('cleon-active-session', String(state.activeSessionIndex));
 }
 
-function restoreSessionState() {
+async function restoreSessionState() {
   try {
     const saved = JSON.parse(localStorage.getItem('cleon-sessions'));
     const activeIndex = parseInt(localStorage.getItem('cleon-active-session')) || 0;
@@ -186,14 +194,10 @@ function restoreSessionState() {
       session.lastContextWindow = data.lastContextWindow;
       state.sessions.push(session);
       createSessionContainer(session);
-      // Populate container with appropriate initial content
+      // Mark sessions with history for lazy loading
       if (session.sessionId) {
-        session.containerEl.innerHTML = `
-          <div class="welcome-message">
-            <h2>Session Resumed</h2>
-            <p>Continue your conversation with Claude.</p>
-          </div>
-        `;
+        session.needsHistoryLoad = true;
+        session.containerEl.innerHTML = '<div class="loading">Loading history</div>';
       } else {
         clearMessages(session);
       }
@@ -201,11 +205,33 @@ function restoreSessionState() {
 
     if (state.sessions.length > 0) {
       state.activeSessionIndex = -1;
-      switchToSession(Math.min(activeIndex, state.sessions.length - 1));
+      const targetIndex = Math.min(activeIndex, state.sessions.length - 1);
+      switchToSession(targetIndex);
       enableChat();
+
+      // Load message history for the active session
+      const activeSession = getActiveSession();
+      if (activeSession && activeSession.needsHistoryLoad) {
+        await loadSessionHistory(activeSession);
+      }
+
+      // Update hash to match restored session (use replaceState to avoid history entry)
+      if (activeSession) {
+        const hash = activeSession.project.name
+          ? `/project/${encodeURIComponent(activeSession.project.name)}${activeSession.sessionId ? `/session/${encodeURIComponent(activeSession.sessionId)}` : ''}`
+          : '';
+        if (hash) window.history.replaceState(null, '', '#' + hash);
+      }
     }
+
+    state.sessionsRestored = true;
+    checkAndReconnectActiveSessions();
+
     return state.sessions.length > 0;
-  } catch { return false; }
+  } catch (e) {
+    console.error('Failed to restore session state:', e);
+    return false;
+  }
 }
 
 // Mode configuration
@@ -521,11 +547,12 @@ function showMain() {
   loadCustomCommands(); // Load global commands initially
 
   // Try to restore sessions from localStorage first
-  const restored = restoreSessionState();
-  if (!restored) {
-    // Fall back to hash restoration
-    restoreFromHash();
-  }
+  restoreSessionState().then(restored => {
+    if (!restored) {
+      // Fall back to hash restoration
+      restoreFromHash();
+    }
+  });
 }
 
 async function restoreFromHash() {
@@ -584,29 +611,44 @@ function showAuthError(msg) {
   authError.classList.remove('hidden');
 }
 
+function checkAndReconnectActiveSessions() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  for (const session of state.sessions) {
+    if (session.sessionId) {
+      state.ws.send(JSON.stringify({
+        type: 'check-active',
+        sessionId: session.sessionId
+      }));
+    }
+  }
+}
+
 function connectWebSocket() {
   if (state.ws?.readyState === WebSocket.OPEN) return;
-  
+
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   state.ws = new WebSocket(`${protocol}//${location.host}?token=${state.token}`);
-  
+
   state.ws.onopen = () => {
     console.log('[WS] Connected');
     state.wsReconnectAttempts = 0;
+    if (state.sessionsRestored) {
+      checkAndReconnectActiveSessions();
+    }
   };
-  
+
   state.ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     handleWsMessage(msg);
   };
-  
+
   state.ws.onclose = () => {
     console.log('[WS] Disconnected');
     state.wsReconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, state.wsReconnectAttempts), 30000);
     setTimeout(connectWebSocket, delay);
   };
-  
+
   state.ws.onerror = (err) => {
     console.error('[WS] Error:', err);
   };
@@ -657,6 +699,42 @@ function handleWsMessage(msg) {
       appendSystemMessage(`Error: ${msg.message}`, session);
       finishStreaming(session);
       if (isInactive) { session.hasUnread = true; renderSessionBar(); }
+      break;
+    case 'session-active':
+      if (msg.active && session) {
+        session.isStreaming = true;
+        session.pendingText = '';
+        // Send subscribe to bind this WS to the active stream
+        state.ws.send(JSON.stringify({
+          type: 'subscribe',
+          sessionId: msg.sessionId
+        }));
+        // Update UI if this is the active session
+        if (state.sessions.indexOf(session) === state.activeSessionIndex) {
+          abortBtn.classList.remove('hidden');
+          chatInput.disabled = true;
+          sendBtn.disabled = true;
+          modeBtn.disabled = true;
+          attachBtn.disabled = true;
+        }
+      }
+      break;
+    case 'subscribe-result':
+      if (session) {
+        if (!msg.success) {
+          // Stream ended between check and subscribe — treat as completed
+          session.isStreaming = false;
+          if (state.sessions.indexOf(session) === state.activeSessionIndex) {
+            abortBtn.classList.add('hidden');
+            chatInput.disabled = false;
+            sendBtn.disabled = false;
+            modeBtn.disabled = false;
+            attachBtn.disabled = false;
+          }
+        } else {
+          console.log('[WS] Reconnected to active stream:', msg.sessionId);
+        }
+      }
       break;
     case 'pong':
       break;
@@ -1538,6 +1616,7 @@ newSessionTabBtn.addEventListener('click', () => {
     alert(`Maximum ${MAX_SESSIONS} sessions reached`);
     return;
   }
+  state.forceNewTab = true;
   openSidebar();
 });
 
@@ -1560,6 +1639,7 @@ function openSidebar() {
 function closeSidebar() {
   sidebar.classList.add('hidden');
   sidebarOverlay.classList.add('hidden');
+  state.forceNewTab = false;
 }
 
 menuBtn.addEventListener('click', openSidebar);
@@ -1646,6 +1726,83 @@ async function searchProjects(query) {
 async function selectProject(name, path, displayName, skipHashUpdate = false) {
   const project = { name, path, displayName };
 
+  // Check if we can reuse the active session
+  const forceNewTab = state.forceNewTab;
+  state.forceNewTab = false;
+
+  const activeSession = getActiveSession();
+  const canReuse = activeSession && !activeSession.isStreaming && !forceNewTab;
+
+  if (canReuse) {
+    // Reuse existing session - reset all properties
+    activeSession.project = { name, path, displayName };
+    activeSession.sessionId = null;
+    activeSession.isStreaming = false;
+    activeSession.pendingText = '';
+    activeSession.pendingQuestion = null;
+    activeSession.attachments = [];
+    activeSession.lastTokenUsage = null;
+    activeSession.lastContextWindow = null;
+    activeSession.hasUnread = false;
+    activeSession.needsHistoryLoad = false;
+    activeSession.fileMentionSelectedIndex = 0;
+    activeSession.fileMentionQuery = '';
+    activeSession.fileMentionStartPos = -1;
+    clearTimeout(activeSession.fileMentionDebounceTimer);
+    activeSession.slashCommandSelectedIndex = -1;
+
+    // Reset DOM
+    clearMessages(activeSession);
+
+    // Update UI
+    projectNameEl.textContent = displayName;
+    if (!skipHashUpdate) updateHash(name);
+
+    // Load custom commands for this project
+    loadCustomCommands(path);
+
+    // Clear token usage and attachments
+    updateTokenUsage(null, null, activeSession);
+    renderAttachmentPreview();
+
+    // Update session bar to reflect new project name
+    renderSessionBar();
+
+    // Save state
+    saveSessionState();
+
+    // Load and display sessions in sidebar
+    projectList.classList.add('hidden');
+    sessionList.classList.remove('hidden');
+    sessionsContainer.innerHTML = '<div class="loading">Loading sessions</div>';
+    newSessionBtn.classList.remove('hidden');
+
+    try {
+      const sessions = await api(`/api/projects/${encodeURIComponent(name)}/sessions`);
+
+      if (sessions.length === 0) {
+        sessionsContainer.innerHTML = '<div class="empty-state">No sessions yet</div>';
+      } else {
+        sessionsContainer.innerHTML = sessions.map(s => `
+          <div class="session-item" data-id="${escapeAttr(s.id)}">
+            <span class="session-preview">${escapeHtml(s.preview)}</span>
+            <span class="session-date">${formatDate(s.lastModified)}</span>
+          </div>
+        `).join('');
+
+        sessionsContainer.querySelectorAll('.session-item').forEach(el => {
+          el.addEventListener('click', () => resumeSession(el.dataset.id));
+        });
+      }
+    } catch (err) {
+      sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
+    }
+
+    return;
+  }
+
+  // Cannot reuse - create new tab (existing behavior)
+
   // Check if we can add another session
   if (state.sessions.length >= MAX_SESSIONS) {
     alert(`Maximum ${MAX_SESSIONS} sessions allowed`);
@@ -1702,21 +1859,19 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
   saveSessionState();
 }
 
-async function resumeSession(sessionId, skipHashUpdate = false) {
-  const session = getActiveSession();
-  if (!session) return;
+async function loadSessionHistory(session) {
+  if (!session.sessionId) {
+    clearMessages(session);
+    return;
+  }
 
-  session.sessionId = sessionId;
-  if (!skipHashUpdate) updateHash(session.project.name, sessionId);
-  clearMessages(session);
   if (session.containerEl) {
     session.containerEl.innerHTML = '<div class="loading">Loading history</div>';
   }
-  closeSidebar();
 
   try {
     const projectName = session.project.name;
-    const { messages } = await api(`/api/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
+    const { messages } = await api(`/api/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(session.sessionId)}/messages?limit=50`);
 
     if (session.containerEl) session.containerEl.innerHTML = '';
 
@@ -1739,6 +1894,10 @@ async function resumeSession(sessionId, skipHashUpdate = false) {
           appendToolMessage(msg.tool, getToolSummaryFromInput(msg.tool, msg.input), null, 'success', session);
         }
       }
+      // Scroll to bottom to show most recent messages
+      if (session.containerEl) {
+        session.containerEl.scrollTop = session.containerEl.scrollHeight;
+      }
     }
   } catch (err) {
     if (session.containerEl) {
@@ -1749,7 +1908,24 @@ async function resumeSession(sessionId, skipHashUpdate = false) {
         </div>
       `;
     }
+    // If session/project was deleted or doesn't exist, clear the sessionId so user starts fresh
+    if (err.message && (err.message.includes('Failed to load') || err.message.includes('404'))) {
+      session.sessionId = null;
+    }
   }
+
+  session.needsHistoryLoad = false;
+}
+
+async function resumeSession(sessionId, skipHashUpdate = false) {
+  const session = getActiveSession();
+  if (!session) return;
+
+  session.sessionId = sessionId;
+  if (!skipHashUpdate) updateHash(session.project.name, sessionId);
+  closeSidebar();
+
+  await loadSessionHistory(session);
 
   enableChat();
   saveSessionState();
