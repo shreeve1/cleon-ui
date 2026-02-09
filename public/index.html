@@ -35,6 +35,13 @@
         <div id="session-info">
           <span id="project-name">Select a project</span>
           <span id="token-usage" class="hidden"></span>
+          <div id="context-bar" class="hidden">
+            <span id="context-model" class="context-model"></span>
+            <div id="context-usage-bar">
+              <div id="context-usage-fill"></div>
+            </div>
+            <span id="context-usage-text"></span>
+          </div>
         </div>
         <div id="header-actions">
           <input type="file" id="file-input" accept="image/*,.txt,.md,.pdf" multiple hidden>
@@ -84,6 +91,12 @@
 
       <main id="chat">
         <div id="session-containers"></div>
+        <button id="scroll-to-bottom-btn" class="hidden" aria-label="Scroll to bottom">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+          <span id="unread-badge" class="hidden">0</span>
+        </button>
         <div id="session-bar">
           <div id="session-tabs"></div>
           <button id="new-session-tab-btn" class="session-tab-btn" title="New session">+</button>
@@ -110,6 +123,10 @@
           <span>Drop files here</span>
         </div>
       </div>
+    </div>
+    <div id="message-context-menu" class="hidden">
+      <button class="ctx-menu-item" data-action="copy-text">Copy Message</button>
+      <button class="ctx-menu-item" data-action="copy-code">Copy Code</button>
     </div>
   </div>
 

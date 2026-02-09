@@ -451,7 +451,7 @@ function extractTokenUsage(modelUsage) {
   const used = input + output + cacheRead + cacheCreate;
   const contextWindow = parseInt(process.env.CONTEXT_WINDOW) || DEFAULT_CONTEXT_WINDOW;
 
-  return { used, contextWindow };
+  return { used, contextWindow, model: modelKey };
 }
 
 /**

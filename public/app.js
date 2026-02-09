@@ -11,6 +11,7 @@ const state = {
   token: localStorage.getItem('token'),
   ws: null,
   wsReconnectAttempts: 0,
+  notificationsEnabled: false,
   // Multi-session state
   sessions: [],              // Array of session objects
   activeSessionIndex: -1,    // Index into sessions array, -1 = none
@@ -35,6 +36,7 @@ function createSession(project, sessionId = null) {
     attachments: [],
     lastTokenUsage: null,
     lastContextWindow: null,
+    model: null,
     hasUnread: false,
     needsHistoryLoad: false,
     containerEl: null,                 // DOM reference
@@ -43,7 +45,9 @@ function createSession(project, sessionId = null) {
     fileMentionQuery: '',
     fileMentionStartPos: -1,
     fileMentionDebounceTimer: null,
-    slashCommandSelectedIndex: -1
+    slashCommandSelectedIndex: -1,
+    unreadCount: 0,
+    isAtBottom: true
   };
 }
 
@@ -66,6 +70,17 @@ function createSessionContainer(session) {
   container.dataset.sessionId = session.id;
   document.getElementById('session-containers').appendChild(container);
   session.containerEl = container;
+  container.addEventListener('scroll', () => {
+    const session = state.sessions.find(s => s.containerEl === container);
+    if (!session) return;
+    const threshold = 100;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    session.isAtBottom = atBottom;
+    if (atBottom) {
+      session.unreadCount = 0;
+      updateScrollFAB(session);
+    }
+  });
   return container;
 }
 
@@ -126,6 +141,7 @@ function switchToSession(index) {
   renderAttachmentPreview();
   updateHash(newSession.project.name, newSession.sessionId);
   renderSessionBar();
+  updateScrollFAB(newSession);
   saveSessionState();
   if (!newSession.isStreaming) chatInput.focus();
 }
@@ -176,7 +192,8 @@ function saveSessionState() {
     sessionId: s.sessionId,
     project: s.project,
     lastTokenUsage: s.lastTokenUsage,
-    lastContextWindow: s.lastContextWindow
+    lastContextWindow: s.lastContextWindow,
+    model: s.model
   }));
   localStorage.setItem('cleon-sessions', JSON.stringify(sessionData));
   localStorage.setItem('cleon-active-session', String(state.activeSessionIndex));
@@ -192,6 +209,7 @@ async function restoreSessionState() {
       const session = createSession(data.project, data.sessionId);
       session.lastTokenUsage = data.lastTokenUsage;
       session.lastContextWindow = data.lastContextWindow;
+      session.model = data.model || null;
       state.sessions.push(session);
       createSessionContainer(session);
       // Mark sessions with history for lazy loading
@@ -331,6 +349,13 @@ const attachmentPreviewEl = $('#attachment-preview');
 const dropZoneOverlay = $('#drop-zone-overlay');
 const fileInput = $('#file-input');
 const attachBtn = $('#attach-btn');
+const contextMenuEl = $('#message-context-menu');
+const contextBar = $('#context-bar');
+const contextModel = $('#context-model');
+const contextUsageFill = $('#context-usage-fill');
+const contextUsageText = $('#context-usage-text');
+const scrollToBottomBtn = $('#scroll-to-bottom-btn');
+const unreadBadge = $('#unread-badge');
 
 // Built-in commands (always available)
 const BUILTIN_COMMANDS = [
@@ -544,6 +569,14 @@ function showMain() {
   authScreen.classList.add('hidden');
   mainScreen.classList.remove('hidden');
   connectWebSocket();
+  // Request notification permission
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(perm => {
+      state.notificationsEnabled = perm === 'granted';
+    });
+  } else if ('Notification' in window) {
+    state.notificationsEnabled = Notification.permission === 'granted';
+  }
   loadCustomCommands(); // Load global commands initially
 
   // Try to restore sessions from localStorage first
@@ -685,9 +718,11 @@ function handleWsMessage(msg) {
       break;
     case 'claude-done':
       finishStreaming(session);
+      sendNotification('Claude finished', session.project.displayName || session.project.name);
       if (isInactive) { session.hasUnread = true; renderSessionBar(); }
       break;
     case 'token-usage':
+      if (msg.model && session) session.model = msg.model;
       updateTokenUsage(msg.used, msg.contextWindow, session);
       break;
     case 'abort-result':
@@ -697,6 +732,7 @@ function handleWsMessage(msg) {
       break;
     case 'error':
       appendSystemMessage(`Error: ${msg.message}`, session);
+      sendNotification('Error', msg.message);
       finishStreaming(session);
       if (isInactive) { session.hasUnread = true; renderSessionBar(); }
       break;
@@ -859,19 +895,41 @@ function appendSystemMessage(content, session) {
   scrollToBottom(session);
 }
 
+function getToolIcon(tool) {
+  const icons = {
+    'Bash': '$',
+    'Read': 'R',
+    'Write': 'W',
+    'Edit': 'E',
+    'Glob': 'G',
+    'Grep': '?',
+    'Task': 'T'
+  };
+  return icons[tool] || '*';
+}
+
+function truncateToolSummary(summary, maxLen) {
+  if (!summary) return '';
+  if (summary.length <= maxLen) return summary;
+  return summary.slice(0, maxLen) + '...';
+}
+
 function appendToolMessage(tool, summary, id, status, session) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
   removeWelcome(session);
   const div = document.createElement('div');
-  div.className = `message tool ${status}`;
+  div.className = `message tool-pill ${status}`;
   div.dataset.toolId = id || '';
   div.innerHTML = `
-    <div class="tool-header">
-      <span class="tool-name">${escapeHtml(tool)}</span>
-      <span class="tool-status">${status}</span>
+    <div class="tool-pill-header">
+      <span class="tool-pill-icon">${getToolIcon(tool)}</span>
+      <span class="tool-pill-name">${escapeHtml(tool)}</span>
+      <span class="tool-pill-summary">${escapeHtml(truncateToolSummary(summary, 50))}</span>
+      <span class="tool-pill-status ${status}">${status === 'running' ? '...' : status === 'success' ? 'done' : 'fail'}</span>
+      <span class="tool-pill-toggle">+</span>
     </div>
-    <div class="tool-summary">${escapeHtml(summary || '')}</div>
+    <div class="tool-pill-output hidden"></div>
   `;
   session.containerEl.appendChild(div);
   scrollToBottom(session);
@@ -881,11 +939,11 @@ function updateToolResult(id, success, output, session) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
 
-  const toolMsgs = session.containerEl.querySelectorAll('.message.tool');
+  const toolMsgs = session.containerEl.querySelectorAll('.message.tool-pill');
   let target = null;
 
   if (id) {
-    target = session.containerEl.querySelector(`.message.tool[data-tool-id="${id}"]`);
+    target = session.containerEl.querySelector(`.message.tool-pill[data-tool-id="${id}"]`);
   }
   if (!target && toolMsgs.length > 0) {
     target = toolMsgs[toolMsgs.length - 1];
@@ -895,18 +953,23 @@ function updateToolResult(id, success, output, session) {
     target.classList.remove('running');
     target.classList.add(success ? 'success' : 'error');
 
-    const statusEl = target.querySelector('.tool-status');
-    if (statusEl) statusEl.textContent = success ? 'done' : 'failed';
+    const statusEl = target.querySelector('.tool-pill-status');
+    if (statusEl) {
+      statusEl.textContent = success ? 'done' : 'fail';
+      statusEl.className = `tool-pill-status ${success ? 'success' : 'error'}`;
+    }
 
     if (output && output.trim()) {
-      const outputEl = document.createElement('div');
-      outputEl.className = 'tool-output';
-      outputEl.textContent = output;
-      target.appendChild(outputEl);
+      const outputEl = target.querySelector('.tool-pill-output');
+      if (outputEl) {
+        outputEl.textContent = output;
+      }
     }
   }
   scrollToBottom(session);
 }
+
+
 
 function renderQuestion(data, session) {
   session = session || getActiveSession();
@@ -1101,13 +1164,43 @@ function clearMessages(session) {
   session.pendingText = '';
 }
 
+function updateScrollFAB(session) {
+  const active = getActiveSession();
+  if (!session || session !== active) return;
+  if (session.isAtBottom || session.unreadCount === 0) {
+    scrollToBottomBtn.classList.add('hidden');
+  } else {
+    scrollToBottomBtn.classList.remove('hidden');
+    if (session.unreadCount > 0) {
+      unreadBadge.textContent = session.unreadCount;
+      unreadBadge.classList.remove('hidden');
+    } else {
+      unreadBadge.classList.add('hidden');
+    }
+  }
+}
+
 function scrollToBottom(session) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
-  requestAnimationFrame(() => {
-    session.containerEl.scrollTop = session.containerEl.scrollHeight;
-  });
+  if (session.isAtBottom !== false) {
+    requestAnimationFrame(() => {
+      session.containerEl.scrollTop = session.containerEl.scrollHeight;
+    });
+  } else {
+    session.unreadCount++;
+    updateScrollFAB(session);
+  }
 }
+
+scrollToBottomBtn.addEventListener('click', () => {
+  const session = getActiveSession();
+  if (!session?.containerEl) return;
+  session.containerEl.scrollTo({ top: session.containerEl.scrollHeight, behavior: 'smooth' });
+  session.unreadCount = 0;
+  session.isAtBottom = true;
+  updateScrollFAB(session);
+});
 
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1213,6 +1306,21 @@ chatInput.addEventListener('blur', () => {
   setTimeout(hideFileMentions, 150);
 });
 
+// Code block copy button delegation
+sessionContainersEl.addEventListener('click', (e) => {
+  const copyBtn = e.target.closest('.code-copy-btn');
+  if (copyBtn) {
+    const wrapper = copyBtn.closest('.code-block-wrapper');
+    const codeEl = wrapper?.querySelector('code');
+    if (codeEl) {
+      navigator.clipboard.writeText(codeEl.textContent).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+      });
+    }
+  }
+});
+
 // Session tab event delegation
 sessionTabsEl.addEventListener('click', (e) => {
   const closeBtn = e.target.closest('.close-tab');
@@ -1226,6 +1334,21 @@ sessionTabsEl.addEventListener('click', (e) => {
     switchToSession(parseInt(tab.dataset.index));
   }
 });
+
+// Tool pill expand/collapse delegation
+sessionContainersEl.addEventListener('click', (e) => {
+  const pillHeader = e.target.closest('.tool-pill-header');
+  if (pillHeader) {
+    const pill = pillHeader.closest('.message.tool-pill');
+    const output = pill?.querySelector('.tool-pill-output');
+    const toggle = pill?.querySelector('.tool-pill-toggle');
+    if (output && output.textContent.trim()) {
+      output.classList.toggle('hidden');
+      if (toggle) toggle.textContent = output.classList.contains('hidden') ? '+' : '-';
+    }
+  }
+});
+
 
 // Keyboard shortcuts for session switching (Ctrl+1 through Ctrl+5)
 document.addEventListener('keydown', (e) => {
@@ -1256,6 +1379,72 @@ if (window.visualViewport) {
     }
   });
 }
+
+// Long-press to copy message
+let longPressTimer = null;
+let longPressTarget = null;
+
+sessionContainersEl.addEventListener('touchstart', (e) => {
+  const msgEl = e.target.closest('.message');
+  if (!msgEl) return;
+  longPressTarget = msgEl;
+  longPressTimer = setTimeout(() => {
+    showContextMenu(msgEl, e.touches[0].clientX, e.touches[0].clientY);
+  }, 500);
+}, { passive: true });
+
+sessionContainersEl.addEventListener('touchend', () => {
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+});
+
+sessionContainersEl.addEventListener('touchmove', () => {
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+});
+
+// Desktop: right-click on messages
+sessionContainersEl.addEventListener('contextmenu', (e) => {
+  const msgEl = e.target.closest('.message');
+  if (!msgEl) return;
+  e.preventDefault();
+  showContextMenu(msgEl, e.clientX, e.clientY);
+});
+
+function showContextMenu(msgEl, x, y) {
+  longPressTarget = msgEl;
+  const hasCode = msgEl.querySelector('pre code');
+  const copyCodeBtn = contextMenuEl.querySelector('[data-action="copy-code"]');
+  copyCodeBtn.style.display = hasCode ? '' : 'none';
+  contextMenuEl.style.left = Math.min(x, window.innerWidth - 160) + 'px';
+  contextMenuEl.style.top = Math.min(y, window.innerHeight - 100) + 'px';
+  contextMenuEl.classList.remove('hidden');
+}
+
+document.addEventListener('click', () => {
+  contextMenuEl.classList.add('hidden');
+});
+document.addEventListener('touchstart', (e) => {
+  if (!contextMenuEl.contains(e.target)) {
+    contextMenuEl.classList.add('hidden');
+  }
+}, { passive: true });
+
+contextMenuEl.addEventListener('click', (e) => {
+  const action = e.target.closest('.ctx-menu-item')?.dataset.action;
+  if (!action || !longPressTarget) return;
+
+  if (action === 'copy-text') {
+    navigator.clipboard.writeText(longPressTarget.textContent);
+  } else if (action === 'copy-code') {
+    const codeEls = longPressTarget.querySelectorAll('pre code');
+    const codeText = Array.from(codeEls).map(el => el.textContent).join('\n\n');
+    navigator.clipboard.writeText(codeText);
+  }
+
+  contextMenuEl.classList.add('hidden');
+  longPressTarget = null;
+});
 
 function handleSlashCommandInput() {
   const value = chatInput.value;
@@ -1897,6 +2086,7 @@ async function loadSessionHistory(session) {
       // Scroll to bottom to show most recent messages
       if (session.containerEl) {
         session.containerEl.scrollTop = session.containerEl.scrollHeight;
+        session.isAtBottom = true;
       }
     }
   } catch (err) {
@@ -1978,26 +2168,65 @@ function updateTokenUsage(used, total, session) {
     session.lastContextWindow = total;
   }
 
-  // Only update DOM if this is the active session
   if (session && state.sessions.indexOf(session) === state.activeSessionIndex) {
     if (!used || !total) {
+      contextBar.classList.add('hidden');
       tokenUsageEl.textContent = '';
       tokenUsageEl.classList.add('hidden');
       return;
     }
+
     const usedK = Math.round(used / 1000);
     const totalK = Math.round(total / 1000);
     const pct = Math.round((used / total) * 100);
+
+    // Update existing token display
     tokenUsageEl.textContent = `${usedK}k / ${totalK}k (${pct}%)`;
     tokenUsageEl.classList.remove('hidden');
 
-    if (pct > 80) {
-      tokenUsageEl.style.color = 'var(--warning)';
-    } else if (pct > 95) {
+    if (pct > 95) {
       tokenUsageEl.style.color = 'var(--error)';
+    } else if (pct > 80) {
+      tokenUsageEl.style.color = 'var(--warning)';
     } else {
       tokenUsageEl.style.color = '';
     }
+
+    // Update context bar
+    contextBar.classList.remove('hidden');
+    if (session.model) {
+      contextModel.textContent = session.model;
+      contextModel.classList.remove('hidden');
+    }
+    contextUsageFill.style.width = `${Math.min(pct, 100)}%`;
+    contextUsageText.textContent = `${usedK}k/${totalK}k`;
+
+    // Color the fill based on usage
+    if (pct > 95) {
+      contextUsageFill.style.background = 'var(--neon-red)';
+    } else if (pct > 80) {
+      contextUsageFill.style.background = 'var(--neon-orange)';
+    } else {
+      contextUsageFill.style.background = 'var(--neon-cyan)';
+    }
+  }
+}
+
+function sendNotification(title, body) {
+  if (!state.notificationsEnabled || !document.hidden) return;
+  try {
+    const notif = new Notification(title, {
+      body: body,
+      icon: '/favicon.ico',
+      tag: 'cleon-ui',
+      silent: false
+    });
+    notif.onclick = () => {
+      window.focus();
+      notif.close();
+    };
+  } catch (e) {
+    // Ignore - notifications may not be supported in this context
   }
 }
 
@@ -2007,7 +2236,8 @@ function formatMarkdown(text) {
   let html = escapeHtml(text);
   
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    return `<pre><code class="${lang}">${code}</code></pre>`;
+    const displayLang = lang || 'code';
+    return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${displayLang}</span><button class="code-copy-btn" aria-label="Copy code">Copy</button></div><pre><code class="${lang}">${code}</code></pre></div>`;
   });
   
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
