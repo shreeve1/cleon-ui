@@ -193,7 +193,8 @@ function saveSessionState() {
     project: s.project,
     lastTokenUsage: s.lastTokenUsage,
     lastContextWindow: s.lastContextWindow,
-    model: s.model
+    model: s.model,
+    cacheMetrics: s.cacheMetrics || null
   }));
   localStorage.setItem('cleon-sessions', JSON.stringify(sessionData));
   localStorage.setItem('cleon-active-session', String(state.activeSessionIndex));
@@ -210,6 +211,7 @@ async function restoreSessionState() {
       session.lastTokenUsage = data.lastTokenUsage;
       session.lastContextWindow = data.lastContextWindow;
       session.model = data.model || null;
+      session.cacheMetrics = data.cacheMetrics || null;
       state.sessions.push(session);
       createSessionContainer(session);
       // Mark sessions with history for lazy loading
@@ -723,7 +725,7 @@ function handleWsMessage(msg) {
       break;
     case 'token-usage':
       if (msg.model && session) session.model = msg.model;
-      updateTokenUsage(msg.used, msg.contextWindow, session);
+      updateTokenUsage(msg, session);
       break;
     case 'abort-result':
       if (msg.success) finishStreaming(session);
@@ -786,6 +788,14 @@ function handleClaudeMessage(data, session) {
 
   if (data.type === 'text') {
     session.pendingText += data.content || '';
+    // Store metadata for the current streaming message
+    if (!session.currentMessageMetadata) {
+      session.currentMessageMetadata = {
+        timestamp: data.timestamp || null,
+        messageId: data.messageId || null,
+        model: data.model || null
+      };
+    }
     updateStreamingMessage(session);
     return;
   }
@@ -803,12 +813,27 @@ function handleClaudeMessage(data, session) {
 
   if (data.type === 'tool_use') {
     flushPendingText(session);
-    appendToolMessage(data.tool, data.summary, data.id, 'running', session);
+    // Pass enhanced metadata to appendToolMessage
+    const toolMetadata = {
+      timestamp: data.timestamp || null,
+      messageId: data.messageId || null,
+      model: data.model || null,
+      startTime: data.startTime || null,
+      summary: data.summary || null
+    };
+    appendToolMessage(data.tool, data.summary, data.id, 'running', session, toolMetadata);
     return;
   }
 
   if (data.type === 'tool_result') {
-    updateToolResult(data.id, data.success, data.output, session);
+    // Pass timing metadata to updateToolResult
+    const resultMetadata = {
+      timestamp: data.timestamp || null,
+      messageId: data.messageId || null,
+      duration: data.duration || null,
+      startTime: data.startTime || null
+    };
+    updateToolResult(data.id, data.success, data.output, session, resultMetadata);
     return;
   }
 }
@@ -820,8 +845,15 @@ function flushPendingText(session) {
     if (streamingEl) {
       streamingEl.classList.remove('streaming');
       streamingEl.innerHTML = formatMarkdown(session.pendingText);
+      // Preserve metadata on the element for history loading
+      if (session.currentMessageMetadata) {
+        streamingEl.dataset.timestamp = session.currentMessageMetadata.timestamp || '';
+        streamingEl.dataset.messageId = session.currentMessageMetadata.messageId || '';
+        streamingEl.dataset.model = session.currentMessageMetadata.model || '';
+      }
     }
     session.pendingText = '';
+    session.currentMessageMetadata = null;
   }
 }
 
@@ -833,6 +865,12 @@ function updateStreamingMessage(session) {
   if (!el) {
     el = document.createElement('div');
     el.className = 'message assistant streaming';
+    // Attach metadata to the element
+    if (session.currentMessageMetadata) {
+      el.dataset.timestamp = session.currentMessageMetadata.timestamp || '';
+      el.dataset.messageId = session.currentMessageMetadata.messageId || '';
+      el.dataset.model = session.currentMessageMetadata.model || '';
+    }
     session.containerEl.appendChild(el);
   }
   el.innerHTML = formatMarkdown(session.pendingText);
@@ -878,7 +916,40 @@ function appendMessage(role, content, session) {
   removeWelcome(session);
   const div = document.createElement('div');
   div.className = `message ${role}`;
-  div.innerHTML = role === 'user' ? escapeHtml(content) : formatMarkdown(content);
+
+  // For assistant messages, add message header with metadata
+  if (role === 'assistant') {
+    // Check if we have metadata from streaming
+    const metadata = session.currentMessageMetadata || {};
+    const timestamp = metadata.timestamp || null;
+    const messageId = metadata.messageId || null;
+    const model = metadata.model || null;
+
+    let headerHtml = '';
+    if (timestamp || messageId || model) {
+      headerHtml = '<div class="message-header">';
+      if (timestamp) {
+        headerHtml += `<span class="message-timestamp" title="${escapeAttr(timestamp)}">${escapeHtml(formatTimestamp(timestamp))}</span>`;
+      }
+      if (messageId) {
+        headerHtml += `<span class="message-id" title="${escapeAttr(messageId)}">· ${escapeHtml(getShortId(messageId))}</span>`;
+      }
+      if (model) {
+        headerHtml += `<span class="model-badge">${escapeHtml(model)}</span>`;
+      }
+      headerHtml += '</div>';
+    }
+
+    div.innerHTML = headerHtml + formatMarkdown(content);
+
+    // Store metadata on element for history loading
+    if (timestamp) div.dataset.timestamp = timestamp;
+    if (messageId) div.dataset.messageId = messageId;
+    if (model) div.dataset.model = model;
+  } else {
+    div.innerHTML = escapeHtml(content);
+  }
+
   session.containerEl.appendChild(div);
   scrollToBottom(session);
 }
@@ -893,6 +964,61 @@ function appendSystemMessage(content, session) {
   div.textContent = content;
   session.containerEl.appendChild(div);
   scrollToBottom(session);
+}
+
+/**
+ * Format timestamp to human-readable time
+ * @param {string} isoString - ISO 8601 timestamp
+ * @returns {string} Formatted time like "2:34 PM" or empty string if invalid
+ */
+function formatTimestamp(isoString) {
+  if (!isoString) return '';
+  const date = new Date(isoString);
+  if (isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * Format duration in milliseconds to human-readable string
+ * @param {number} durationMs - Duration in milliseconds
+ * @returns {string} Formatted duration like "1.2s" or "234ms"
+ */
+function formatDuration(durationMs) {
+  if (durationMs === null || durationMs === undefined) return '';
+  const ms = Number(durationMs);
+  if (isNaN(ms)) return '';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * Get short UUID (last 8 characters)
+ * @param {string} uuid - Full UUID
+ * @returns {string} Short UUID
+ */
+function getShortId(uuid) {
+  if (!uuid) return '';
+  return uuid.slice(-8);
+}
+
+/**
+ * Copy text to clipboard with optional feedback
+ * @param {string} text - Text to copy
+ * @param {HTMLElement} feedbackEl - Optional element for visual feedback
+ */
+function copyToClipboard(text, feedbackEl = null) {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    if (feedbackEl) {
+      const originalText = feedbackEl.textContent;
+      feedbackEl.textContent = 'Copied!';
+      setTimeout(() => {
+        feedbackEl.textContent = originalText;
+      }, 1500);
+    }
+  }).catch(err => {
+    console.warn('Failed to copy:', err);
+  });
 }
 
 function getToolIcon(tool) {
@@ -910,32 +1036,75 @@ function getToolIcon(tool) {
 
 function truncateToolSummary(summary, maxLen) {
   if (!summary) return '';
-  if (summary.length <= maxLen) return summary;
-  return summary.slice(0, maxLen) + '...';
+  // Handle both string and object summary formats
+  const summaryStr = typeof summary === 'object' ? summary.summary || JSON.stringify(summary) : summary;
+  if (summaryStr.length <= maxLen) return summaryStr;
+  return summaryStr.slice(0, maxLen) + '...';
 }
 
-function appendToolMessage(tool, summary, id, status, session) {
+function appendToolMessage(tool, summary, id, status, session, metadata = null) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
   removeWelcome(session);
   const div = document.createElement('div');
   div.className = `message tool-pill ${status}`;
   div.dataset.toolId = id || '';
-  div.innerHTML = `
+
+  // Store metadata on the element for history loading
+  if (metadata) {
+    div.dataset.timestamp = metadata.timestamp || '';
+    div.dataset.messageId = metadata.messageId || '';
+    div.dataset.model = metadata.model || '';
+    div.dataset.startTime = metadata.startTime || '';
+  }
+
+  // Store full summary object (contains fullCommand, filePath, pattern, etc.)
+  const summaryObj = typeof summary === 'object' ? summary : null;
+  if (summaryObj) {
+    div.dataset.summaryData = JSON.stringify(summaryObj);
+  }
+
+  // Build expanded details section HTML
+  let detailsHtml = '';
+  if (summaryObj) {
+    detailsHtml = '<div class="tool-details">';
+    if (metadata?.startTime) {
+      detailsHtml += `<div class="tool-start-time">Started: ${escapeHtml(formatTimestamp(metadata.startTime))}</div>`;
+    }
+    if (summaryObj.fullCommand) {
+      detailsHtml += `<div class="tool-command"><strong>Command:</strong> <code>${escapeHtml(summaryObj.fullCommand)}</code></div>`;
+    }
+    if (summaryObj.filePath) {
+      detailsHtml += `<div class="tool-file-path"><strong>File:</strong> <code>${escapeHtml(summaryObj.filePath)}</code></div>`;
+    }
+    if (summaryObj.pattern && summaryObj.fullQuery) {
+      detailsHtml += `<div class="tool-pattern"><strong>Pattern:</strong> <code>${escapeHtml(summaryObj.pattern)}</code></div>`;
+      detailsHtml += `<div class="tool-full-query"><strong>Query:</strong> <code>${escapeHtml(summaryObj.fullQuery)}</code></div>`;
+    } else if (summaryObj.pattern) {
+      detailsHtml += `<div class="tool-pattern"><strong>Pattern:</strong> <code>${escapeHtml(summaryObj.pattern)}</code></div>`;
+    }
+    detailsHtml += '</div>';
+  }
+
+  // Build header HTML
+  const summaryStr = truncateToolSummary(summary, 50);
+  let headerHtml = `
     <div class="tool-pill-header">
       <span class="tool-pill-icon">${getToolIcon(tool)}</span>
       <span class="tool-pill-name">${escapeHtml(tool)}</span>
-      <span class="tool-pill-summary">${escapeHtml(truncateToolSummary(summary, 50))}</span>
+      <span class="tool-pill-summary">${escapeHtml(summaryStr)}</span>
+      <span class="tool-pill-duration" data-tool-id="${escapeAttr(id || '')}"></span>
       <span class="tool-pill-status ${status}">${status === 'running' ? '...' : status === 'success' ? 'done' : 'fail'}</span>
-      <span class="tool-pill-toggle">+</span>
+      ${summaryObj ? '<span class="tool-pill-toggle" title="Toggle details">⌃</span>' : ''}
     </div>
-    <div class="tool-pill-output hidden"></div>
   `;
+
+  div.innerHTML = headerHtml + detailsHtml + '<div class="tool-pill-output"></div>';
   session.containerEl.appendChild(div);
   scrollToBottom(session);
 }
 
-function updateToolResult(id, success, output, session) {
+function updateToolResult(id, success, output, session, resultMetadata = null) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
 
@@ -957,6 +1126,20 @@ function updateToolResult(id, success, output, session) {
     if (statusEl) {
       statusEl.textContent = success ? 'done' : 'fail';
       statusEl.className = `tool-pill-status ${success ? 'success' : 'error'}`;
+    }
+
+    // Store result metadata (duration, etc.) and display duration
+    if (resultMetadata) {
+      if (resultMetadata.duration !== null && resultMetadata.duration !== undefined) {
+        target.dataset.duration = String(resultMetadata.duration);
+        const durationEl = target.querySelector('.tool-pill-duration');
+        if (durationEl) {
+          durationEl.textContent = formatDuration(resultMetadata.duration);
+        }
+      }
+      if (resultMetadata.timestamp) {
+        target.dataset.resultTimestamp = resultMetadata.timestamp;
+      }
     }
 
     if (output && output.trim()) {
@@ -1319,6 +1502,26 @@ sessionContainersEl.addEventListener('click', (e) => {
       });
     }
   }
+
+  // Message ID click to copy full UUID
+  const messageIdEl = e.target.closest('.message-id');
+  if (messageIdEl) {
+    const fullId = messageIdEl.title;
+    if (fullId) {
+      copyToClipboard(fullId, messageIdEl);
+    }
+    e.preventDefault();
+  }
+
+  // File link click to copy path to clipboard
+  const fileLinkEl = e.target.closest('.file-link');
+  if (fileLinkEl) {
+    const path = fileLinkEl.dataset.path;
+    if (path) {
+      copyToClipboard(path, fileLinkEl);
+    }
+    e.preventDefault();
+  }
 });
 
 // Session tab event delegation
@@ -1341,10 +1544,28 @@ sessionContainersEl.addEventListener('click', (e) => {
   if (pillHeader) {
     const pill = pillHeader.closest('.message.tool-pill');
     const output = pill?.querySelector('.tool-pill-output');
+    const details = pill?.querySelector('.tool-details');
     const toggle = pill?.querySelector('.tool-pill-toggle');
-    if (output && output.textContent.trim()) {
-      output.classList.toggle('hidden');
-      if (toggle) toggle.textContent = output.classList.contains('hidden') ? '+' : '-';
+
+    // Toggle output section if it has content
+    let hasOutput = output && output.textContent.trim();
+    let hasDetails = details && !details.classList.contains('hidden') || details?.querySelector('*');
+
+    if (hasOutput || hasDetails) {
+      const isExpanded = !output?.classList.contains('hidden') || !details?.classList.contains('hidden');
+
+      // Toggle both output and details
+      if (output) {
+        output.classList.toggle('hidden', isExpanded);
+      }
+      if (details) {
+        details.classList.toggle('hidden', isExpanded);
+      }
+
+      // Update toggle icon
+      if (toggle) {
+        toggle.textContent = isExpanded ? '⌄' : '⌃';
+      }
     }
   }
 });
@@ -2078,9 +2299,45 @@ async function loadSessionHistory(session) {
         if (msg.role === 'user') {
           appendMessage('user', msg.content, session);
         } else if (msg.role === 'assistant') {
-          appendMessage('assistant', msg.content, session);
+          // Create element directly with metadata to preserve message header
+          const div = document.createElement('div');
+          div.className = 'message assistant';
+
+          // Build message header with metadata from API
+          let headerHtml = '';
+          if (msg.timestamp || msg.messageId || msg.model) {
+            headerHtml = '<div class="message-header">';
+            if (msg.timestamp) {
+              headerHtml += `<span class="message-timestamp" title="${escapeAttr(msg.timestamp)}">${escapeHtml(formatTimestamp(msg.timestamp))}</span>`;
+            }
+            if (msg.messageId) {
+              headerHtml += `<span class="message-id" title="${escapeAttr(msg.messageId)}">· ${escapeHtml(getShortId(msg.messageId))}</span>`;
+            }
+            if (msg.model) {
+              headerHtml += `<span class="model-badge">${escapeHtml(msg.model)}</span>`;
+            }
+            headerHtml += '</div>';
+          }
+
+          div.innerHTML = headerHtml + formatMarkdown(msg.content);
+
+          // Store metadata on element for reference
+          if (msg.timestamp) div.dataset.timestamp = msg.timestamp;
+          if (msg.messageId) div.dataset.messageId = msg.messageId;
+          if (msg.model) div.dataset.model = msg.model;
+
+          session.containerEl.appendChild(div);
         } else if (msg.role === 'tool') {
-          appendToolMessage(msg.tool, getToolSummaryFromInput(msg.tool, msg.input), null, 'success', session);
+          // Build metadata object for historical tool messages
+          const toolMetadata = {
+            timestamp: msg.timestamp || null,
+            messageId: msg.messageId || null,
+            model: msg.model || null
+          };
+
+          // Use enhanced summary from API if available, otherwise fall back to legacy
+          const summary = msg.summary || getToolSummaryFromInput(msg.tool, msg.input);
+          appendToolMessage(msg.tool, summary, null, 'success', session, toolMetadata);
         }
       }
       // Scroll to bottom to show most recent messages
@@ -2161,55 +2418,101 @@ function enableChat() {
   chatInput.focus();
 }
 
-function updateTokenUsage(used, total, session) {
+function updateTokenUsage(usage, session) {
   session = session || getActiveSession();
-  if (session) {
-    session.lastTokenUsage = used;
-    session.lastContextWindow = total;
+  if (!usage || !session) {
+    contextBar.classList.add('hidden');
+    tokenUsageEl.textContent = '';
+    tokenUsageEl.classList.add('hidden');
+    return;
   }
 
-  if (session && state.sessions.indexOf(session) === state.activeSessionIndex) {
-    if (!used || !total) {
-      contextBar.classList.add('hidden');
-      tokenUsageEl.textContent = '';
-      tokenUsageEl.classList.add('hidden');
-      return;
-    }
+  // Extract values from new usage data structure
+  const {
+    cumulativeTotal,
+    cumulativeInput,
+    cumulativeOutput,
+    cacheRead,
+    cacheCreate,
+    contextWindow,
+    model,
+    used,
+    contextWindow: ctxWindow
+  } = usage;
 
-    const usedK = Math.round(used / 1000);
-    const totalK = Math.round(total / 1000);
-    const pct = Math.round((used / total) * 100);
+  // Support both old format (used, total) and new format (cumulativeTotal, contextWindow)
+  const totalTokens = cumulativeTotal || used;
+  const windowSize = contextWindow || ctxWindow;
 
-    // Update existing token display
-    tokenUsageEl.textContent = `${usedK}k / ${totalK}k (${pct}%)`;
-    tokenUsageEl.classList.remove('hidden');
-
-    if (pct > 95) {
-      tokenUsageEl.style.color = 'var(--error)';
-    } else if (pct > 80) {
-      tokenUsageEl.style.color = 'var(--warning)';
-    } else {
-      tokenUsageEl.style.color = '';
-    }
-
-    // Update context bar
-    contextBar.classList.remove('hidden');
-    if (session.model) {
-      contextModel.textContent = session.model;
-      contextModel.classList.remove('hidden');
-    }
-    contextUsageFill.style.width = `${Math.min(pct, 100)}%`;
-    contextUsageText.textContent = `${usedK}k/${totalK}k`;
-
-    // Color the fill based on usage
-    if (pct > 95) {
-      contextUsageFill.style.background = 'var(--neon-red)';
-    } else if (pct > 80) {
-      contextUsageFill.style.background = 'var(--neon-orange)';
-    } else {
-      contextUsageFill.style.background = 'var(--neon-cyan)';
-    }
+  if (!totalTokens || !windowSize) {
+    contextBar.classList.add('hidden');
+    tokenUsageEl.textContent = '';
+    tokenUsageEl.classList.add('hidden');
+    return;
   }
+
+  // Store metrics on session
+  session.lastTokenUsage = totalTokens;
+  session.lastContextWindow = windowSize;
+  if (model) session.model = model;
+  if (cacheRead !== undefined || cacheCreate !== undefined) {
+    session.cacheMetrics = { cacheRead: cacheRead || 0, cacheCreate: cacheCreate || 0 };
+  }
+
+  if (state.sessions.indexOf(session) !== state.activeSessionIndex) return;
+
+  // Format numbers for display (in thousands)
+  const totalK = Math.round(totalTokens / 1000);
+  const windowK = Math.round(windowSize / 1000);
+
+  // Calculate percentage of context window being used
+  const pct = Math.min(Math.round((totalTokens / windowSize) * 100), 100);
+
+  // Update main display: "15k / 200k (8%)"
+  tokenUsageEl.textContent = `${totalK}k / ${windowK}k (${pct}%)`;
+  tokenUsageEl.classList.remove('hidden');
+
+  // Color coding based on utilization
+  if (pct > 95) {
+    tokenUsageEl.style.color = 'var(--error)';
+  } else if (pct > 80) {
+    tokenUsageEl.style.color = 'var(--warning)';
+  } else {
+    tokenUsageEl.style.color = '';
+  }
+
+  // Update context bar
+  contextBar.classList.remove('hidden');
+  if (session.model) {
+    contextModel.textContent = session.model;
+    contextModel.classList.remove('hidden');
+  }
+
+  // Update visual bar
+  contextUsageFill.style.width = `${pct}%`;
+  contextUsageText.textContent = `${totalK}k/${windowK}k`;
+
+  // Color the fill based on usage
+  if (pct > 95) {
+    contextUsageFill.style.background = 'var(--neon-red)';
+  } else if (pct > 80) {
+    contextUsageFill.style.background = 'var(--neon-orange)';
+  } else {
+    contextUsageFill.style.background = 'var(--neon-cyan)';
+  }
+
+  // Build tooltip with detailed breakdown
+  const inputTokens = cumulativeInput || 0;
+  const outputTokens = cumulativeOutput || 0;
+  const cacheReadTokens = cacheRead || 0;
+  const cacheCreateTokens = cacheCreate || 0;
+
+  const tooltipText = `Input: ${inputTokens.toLocaleString()} tokens\n` +
+                     `Output: ${outputTokens.toLocaleString()} tokens\n` +
+                     `Cache Read: ${cacheReadTokens.toLocaleString()} tokens\n` +
+                     `Cache Created: ${cacheCreateTokens.toLocaleString()} tokens\n` +
+                     `Context Window: ${windowSize.toLocaleString()} tokens`;
+  contextBar.title = tooltipText;
 }
 
 function sendNotification(title, body) {
@@ -2230,21 +2533,67 @@ function sendNotification(title, body) {
   }
 }
 
+/**
+ * Linkify file paths in text
+ * Detects common path patterns and wraps them in clickable links
+ * Paths like /path/to/file, ./relative/path, ../parent/path, ~/home/path
+ */
+function linkifyFilePaths(text) {
+  if (!text) return '';
+
+  // Pattern to match file paths:
+  // - Absolute paths: /path/to/file
+  // - Relative paths: ./path or ../path
+  // - Home paths: ~/path
+  // Excludes paths already in code blocks or URLs
+  const pathPattern = /(^|\s)(~?\.?\.?\/[\w\-./~\\]+)/g;
+
+  return text.replace(pathPattern, (match, prefix, path) => {
+    return `${prefix}<a class="file-link" href="#" data-path="${escapeAttr(path)}">${escapeHtml(path)}</a>`;
+  });
+}
+
 function formatMarkdown(text) {
   if (!text) return '';
-  
+
   let html = escapeHtml(text);
-  
+
+  // First, protect code blocks from linkification
+  const codeBlocks = [];
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const displayLang = lang || 'code';
-    return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${displayLang}</span><button class="code-copy-btn" aria-label="Copy code">Copy</button></div><pre><code class="${lang}">${code}</code></pre></div>`;
+    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+    codeBlocks.push({ lang, code, full: _ });
+    return placeholder;
   });
-  
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Also protect inline code
+  const inlineCodes = [];
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    const placeholder = `__INLINE_CODE_${inlineCodes.length}__`;
+    inlineCodes.push(code);
+    return placeholder;
+  });
+
+  // Linkify file paths (now that code blocks are protected)
+  html = linkifyFilePaths(html);
+
+  // Restore inline code
+  html = html.replace(/__INLINE_CODE_(\d+)__/g, (_, idx) => {
+    return `<code>${inlineCodes[idx]}</code>`;
+  });
+
+  // Apply other markdown formatting
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   html = html.replace(/\n/g, '<br>');
-  
+
+  // Restore code blocks
+  html = html.replace(/__CODE_BLOCK_(\d+)__/g, (_, idx) => {
+    const block = codeBlocks[idx];
+    const displayLang = block.lang || 'code';
+    return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${displayLang}</span><button class="code-copy-btn" aria-label="Copy code">Copy</button></div><pre><code class="${block.lang}">${block.code}</code></pre></div>`;
+  });
+
   return html;
 }
 

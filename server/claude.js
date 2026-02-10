@@ -9,6 +9,18 @@ const DEFAULT_CONTEXT_WINDOW = 200000;
 const TOOL_OUTPUT_TRUNCATE_LENGTH = 500;
 const TOOL_SUMMARY_TRUNCATE_LENGTH = 100;
 
+// Model-specific context window sizes
+const MODEL_CONTEXT_WINDOWS = {
+  'claude-3-opus-20240229': 200000,
+  'claude-3-sonnet-20240229': 200000,
+  'claude-3-haiku-20240307': 200000,
+  'claude-3-5-sonnet-20241022': 200000,
+  'claude-3-5-sonnet-20240620': 200000,
+  'claude-3-5-haiku-20241022': 200000,
+  // Newer models - update as SDK adds them
+  'default': 200000
+};
+
 // Track active sessions for abort capability
 const activeSessions = new Map();
 
@@ -16,9 +28,16 @@ const activeSessions = new Map();
 // Used by canUseTool callback to wait for user responses to AskUserQuestion
 const pendingQuestionCallbacks = new Map();
 
+// Track tool execution start times - map of toolUseId -> startTime (Date)
+const toolStartTimes = new Map();
+
+// Track current model per session - map of sessionId -> model
+const sessionModels = new Map();
+
 /**
  * Process messages from a query stream
  * Used both for initial query and after question responses
+ * Captures model information and adds it to messages
  */
 async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
   for await (const message of queryInstance) {
@@ -27,19 +46,12 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
       onSessionId(message.session_id);
     }
 
-    // Transform and forward message
-    const transformed = transformMessage(message);
-    if (transformed) {
-      sendMessage(sessionInfo.ws, {
-        type: 'claude-message',
-        sessionId: message.session_id,
-        data: transformed
-      });
-    }
-
-    // Extract token usage from result
+    // Extract model from token usage for subsequent messages
     if (message.type === 'result' && message.modelUsage) {
       const usage = extractTokenUsage(message.modelUsage);
+      if (usage && usage.model) {
+        sessionModels.set(message.session_id, usage.model);
+      }
       if (usage) {
         sendMessage(sessionInfo.ws, {
           type: 'token-usage',
@@ -47,6 +59,17 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
           ...usage
         });
       }
+    }
+
+    // Transform and forward message (pass current model)
+    const currentModel = message.session_id ? sessionModels.get(message.session_id) : null;
+    const transformed = transformMessage(message, currentModel);
+    if (transformed) {
+      sendMessage(sessionInfo.ws, {
+        type: 'claude-message',
+        sessionId: message.session_id,
+        data: transformed
+      });
     }
   }
 }
@@ -326,28 +349,50 @@ function sendMessage(ws, data) {
   }
 }
 
+// Generate timestamp in ISO 8601 format
+function generateTimestamp() {
+  return new Date().toISOString();
+}
+
 /**
  * Transform SDK message for frontend display
  * Simplifies tool outputs to show minimal relevant info
+ * Adds timestamp and message ID to all message types for tracking
+ * Tracks tool execution timing for performance monitoring
+ * Includes model information when available
  */
-function transformMessage(msg) {
+function transformMessage(msg, model = null) {
   if (!msg || !msg.type) return null;
+
+  // Common metadata for all messages
+  const timestamp = generateTimestamp();
+  const messageId = randomUUID();
 
   // Text content from assistant
   if (msg.type === 'assistant' && msg.message?.content) {
     const content = msg.message.content;
-    
+
     // Extract text blocks
     if (Array.isArray(content)) {
       const texts = content
         .filter(c => c.type === 'text')
         .map(c => c.text)
         .join('');
-      
+
       if (texts) {
-        return { type: 'text', content: texts };
+        const result = {
+          type: 'text',
+          content: texts,
+          timestamp,
+          messageId
+        };
+        // Add model if available
+        if (model) {
+          result.model = model;
+        }
+        return result;
       }
-      
+
       // Check for tool use blocks
       const toolUse = content.find(c => c.type === 'tool_use');
       if (toolUse) {
@@ -356,17 +401,53 @@ function transformMessage(msg) {
           return null;
         }
 
-        return {
+        // Record start time for this tool
+        const startTime = new Date();
+        toolStartTimes.set(toolUse.id, startTime);
+
+        // Clean up old entries (keep last 100 to prevent memory leaks)
+        if (toolStartTimes.size > 100) {
+          const firstKey = toolStartTimes.keys().next().value;
+          toolStartTimes.delete(firstKey);
+        }
+
+        const result = {
           type: 'tool_use',
           tool: toolUse.name,
           id: toolUse.id,
-          summary: getToolSummary(toolUse.name, toolUse.input)
+          summary: getToolSummary(toolUse.name, toolUse.input),
+          timestamp,
+          messageId,
+          startTime: startTime.toISOString()
         };
+        // Add model if available
+        if (model) {
+          result.model = model;
+        }
+        // Ensure summary is an object with backward-compatible string summary
+        if (typeof result.summary === 'object' && result.summary.summary) {
+          // Already has object format - good!
+          // The frontend can access result.summary.summary (string) and result.summary.fullCommand, etc.
+        } else if (typeof result.summary === 'string') {
+          // For backward compatibility with old format
+          result.summary = { summary: result.summary };
+        }
+        return result;
       }
     }
-    
+
     if (typeof content === 'string') {
-      return { type: 'text', content };
+      const result = {
+        type: 'text',
+        content,
+        timestamp,
+        messageId
+      };
+      // Add model if available
+      if (model) {
+        result.model = model;
+      }
+      return result;
     }
   }
 
@@ -381,17 +462,37 @@ function transformMessage(msg) {
     if (Array.isArray(content)) {
       const toolResult = content.find(c => c.type === 'tool_result');
       if (toolResult) {
-        return {
+        const toolUseId = toolResult.tool_use_id;
+        const startTime = toolStartTimes.get(toolUseId);
+        const endTime = new Date();
+
+        // Calculate duration if we have start time
+        let duration = null;
+        let startTimeIso = null;
+        if (startTime) {
+          duration = endTime.getTime() - startTime.getTime();
+          startTimeIso = startTime.toISOString();
+          // Clean up after use
+          toolStartTimes.delete(toolUseId);
+        }
+
+        const result = {
           type: 'tool_result',
-          id: toolResult.tool_use_id,
+          id: toolUseId,
           success: !toolResult.is_error,
           output: truncateOutput(
             typeof toolResult.content === 'string'
               ? toolResult.content
               : JSON.stringify(toolResult.content),
             TOOL_OUTPUT_TRUNCATE_LENGTH
-          )
+          ),
+          timestamp,
+          messageId,
+          duration,
+          startTime: startTimeIso
         };
+        // Note: tool_result doesn't get model field as it's from the user side
+        return result;
       }
     }
   }
@@ -405,22 +506,74 @@ function transformMessage(msg) {
 }
 
 // Tool summary formatters (data-driven approach)
+// Returns object with summary string and full command details
 const toolFormatters = {
-  bash: (i) => `$ ${truncateOutput(i.command || i.cmd || '', TOOL_SUMMARY_TRUNCATE_LENGTH)}`,
-  read: (i) => `Reading ${i.file_path || i.path || 'file'}`,
-  write: (i) => `Writing ${i.file_path || i.path || 'file'}`,
-  edit: (i) => `Editing ${i.file_path || i.path || 'file'}`,
-  glob: (i) => `Finding ${i.pattern || 'files'}`,
-  grep: (i) => `Searching: ${i.pattern || i.query || ''}`,
-  todowrite: () => 'Updating todo list',
-  todoread: () => 'Reading todo list',
-  task: () => 'Delegating task'
+  bash: (i) => {
+    const fullCommand = i.command || i.cmd || '';
+    return {
+      summary: `$ ${truncateOutput(fullCommand, TOOL_SUMMARY_TRUNCATE_LENGTH)}`,
+      fullCommand: fullCommand
+    };
+  },
+  read: (i) => {
+    const filePath = i.file_path || i.path || null;
+    return {
+      summary: `Reading ${filePath || 'file'}`,
+      filePath: filePath
+    };
+  },
+  write: (i) => {
+    const filePath = i.file_path || i.path || null;
+    return {
+      summary: `Writing ${filePath || 'file'}`,
+      filePath: filePath
+    };
+  },
+  edit: (i) => {
+    const filePath = i.file_path || i.path || null;
+    return {
+      summary: `Editing ${filePath || 'file'}`,
+      filePath: filePath
+    };
+  },
+  glob: (i) => {
+    const pattern = i.pattern || null;
+    return {
+      summary: `Finding ${pattern || 'files'}`,
+      pattern: pattern
+    };
+  },
+  grep: (i) => {
+    const pattern = i.pattern || i.query || null;
+    const fullQuery = i.query || pattern || '';
+    return {
+      summary: `Searching: ${truncateOutput(pattern || '', TOOL_SUMMARY_TRUNCATE_LENGTH)}`,
+      pattern: pattern,
+      fullQuery: fullQuery
+    };
+  },
+  todowrite: () => ({ summary: 'Updating todo list' }),
+  todoread: () => ({ summary: 'Reading todo list' }),
+  task: () => ({ summary: 'Delegating task' })
 };
 
+/**
+ * Get tool summary with full command details
+ * Returns object with backward-compatible 'summary' string and additional fields
+ * @param {string} tool - Tool name
+ * @param {object} input - Tool input parameters
+ * @returns {object} Object with summary string and optional fullCommand, filePath, pattern fields
+ */
 function getToolSummary(tool, input) {
-  if (!input) return tool;
+  if (!input) {
+    return { summary: tool };
+  }
   const formatter = toolFormatters[tool.toLowerCase()];
-  return formatter ? formatter(input) : tool;
+  if (formatter) {
+    return formatter(input);
+  }
+  // Default: return tool name as summary
+  return { summary: tool };
 }
 
 /**
@@ -434,24 +587,61 @@ function truncateOutput(content, maxLength) {
 
 /**
  * Extract token usage from SDK modelUsage
+ * Returns enhanced metrics with model-specific context windows and separate cache metrics
  */
 function extractTokenUsage(modelUsage) {
   if (!modelUsage) return null;
 
   const modelKey = Object.keys(modelUsage)[0];
   const data = modelUsage[modelKey];
-  
+
   if (!data) return null;
 
+  // Get raw token counts from SDK
   const input = data.cumulativeInputTokens || data.inputTokens || 0;
   const output = data.cumulativeOutputTokens || data.outputTokens || 0;
   const cacheRead = data.cumulativeCacheReadInputTokens || data.cacheReadInputTokens || 0;
   const cacheCreate = data.cumulativeCacheCreationInputTokens || data.cacheCreationInputTokens || 0;
 
-  const used = input + output + cacheRead + cacheCreate;
-  const contextWindow = parseInt(process.env.CONTEXT_WINDOW) || DEFAULT_CONTEXT_WINDOW;
+  // Calculate cumulative total (all tokens in conversation history)
+  const cumulativeTotal = input + output + cacheRead + cacheCreate;
 
-  return { used, contextWindow, model: modelKey };
+  // Get model-specific context window
+  const contextWindow = MODEL_CONTEXT_WINDOWS[modelKey] ||
+                       parseInt(process.env.CONTEXT_WINDOW) ||
+                       DEFAULT_CONTEXT_WINDOW;
+
+  // Estimate current context (this is approximate since SDK manages context internally)
+  // The SDK may truncate/summarize, so we use the minimum of cumulative and context window
+  // In reality, the SDK manages this and we don't have direct visibility
+  const estimatedContextUsed = Math.min(cumulativeTotal, contextWindow);
+
+  // Calculate what percentage of context is actually being used on each turn
+  // This uses the input tokens from the most recent turn (approximation)
+  const currentTurnTokens = data.inputTokens || data.cumulativeInputTokens || 0;
+  const contextUtilization = Math.min((currentTurnTokens / contextWindow) * 100, 100);
+
+  return {
+    // Cumulative metrics
+    cumulativeTotal,
+    cumulativeInput: input,
+    cumulativeOutput: output,
+
+    // Cache metrics (separate from context)
+    cacheRead,
+    cacheCreate,
+
+    // Context window info
+    contextWindow,
+    model: modelKey,
+
+    // Estimated utilization
+    estimatedContextUsed,
+    contextUtilization,
+
+    // Backward compatibility - keep 'used' for existing code
+    used: cumulativeTotal
+  };
 }
 
 /**

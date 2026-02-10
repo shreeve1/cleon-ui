@@ -715,6 +715,68 @@ body::after {
   box-shadow: 0 2px 15px rgba(0, 0, 0, 0.2);
 }
 
+/* Message Header */
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dimmer);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.message-timestamp {
+  font-family: monospace;
+  color: var(--text-dim);
+}
+
+.message-id {
+  font-family: monospace;
+  color: var(--neon-purple);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.message-id:hover {
+  background: rgba(184, 41, 255, 0.1);
+  color: var(--neon-purple-dim);
+}
+
+.message-id:active {
+  transform: scale(0.95);
+}
+
+/* Model Badge */
+.model-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: monospace;
+  font-weight: 600;
+  color: var(--neon-pink);
+  background: rgba(255, 45, 149, 0.1);
+  border: 1px solid rgba(255, 45, 149, 0.3);
+  border-radius: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.model-badge::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--neon-pink);
+  border-radius: 50%;
+  margin-right: 6px;
+  box-shadow: 0 0 6px var(--neon-pink);
+}
+
 .message.streaming::after {
   content: '';
   display: inline-block;
@@ -797,11 +859,71 @@ body::after {
   color: var(--neon-red);
 }
 
+/* Tool Duration Display */
+.tool-duration {
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--neon-cyan);
+  padding: 0 6px;
+  border-left: 1px solid var(--border);
+  margin-left: 4px;
+}
+
+.tool-duration::before {
+  content: '';
+}
+
+/* Tool Toggle Button */
 .tool-pill-toggle {
   color: var(--text-dim);
   font-size: 14px;
   min-width: 14px;
   text-align: center;
+  transition: transform 0.2s ease;
+}
+
+.tool-pill-toggle.expanded {
+  transform: rotate(180deg);
+}
+
+/* Tool Details Section (expandable) */
+.tool-details {
+  margin: 6px 0 6px 16px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border-left: 2px solid var(--neon-purple);
+  border-radius: 0 6px 6px 0;
+  font-family: monospace;
+  font-size: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tool-details.hidden {
+  display: none;
+}
+
+.tool-details pre {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-dim);
+}
+
+.tool-start-time {
+  font-size: 10px;
+  color: var(--text-dimmer);
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.tool-command {
+  color: var(--neon-cyan);
+  margin-top: 6px;
 }
 
 .tool-pill-output {
@@ -825,6 +947,49 @@ body::after {
 @media (max-width: 767px) {
   .tool-pill-summary {
     max-width: 120px;
+  }
+  .tool-duration {
+    font-size: 10px;
+    padding: 0 4px;
+  }
+
+  /* Condensed message headers on mobile */
+  .message-header {
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  /* Hide message ID on mobile to save space */
+  .message-id {
+    display: none;
+  }
+
+  /* Show only timestamp and model badge on mobile */
+  .message-timestamp {
+    font-size: 10px;
+  }
+
+  .model-badge {
+    font-size: 9px;
+    padding: 1px 6px;
+  }
+
+  .model-badge::before {
+    width: 4px;
+    height: 4px;
+    margin-right: 4px;
+  }
+
+  /* File links remain clickable with proper touch target */
+  .file-link {
+    padding: 2px 0;
+    min-height: 44px;
+    display: inline-block;
+  }
+
+  /* Stack tool pill elements vertically if needed */
+  .tool-pill-header {
+    flex-wrap: wrap;
   }
 }
 
@@ -1000,6 +1165,37 @@ body::after {
   padding: 0;
   font-size: 13px;
   color: var(--text);
+}
+
+/* File Links */
+.file-link {
+  color: var(--neon-cyan);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--neon-cyan);
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.file-link:hover {
+  color: var(--neon-cyan-dim);
+  border-bottom-style: solid;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.5);
+}
+
+.file-link:active {
+  transform: scale(0.98);
+  text-shadow: 0 0 12px rgba(0, 240, 255, 0.7);
+}
+
+/* Don't linkify file paths in code blocks */
+.message pre code .file-link,
+.message code .file-link {
+  color: inherit;
+  border-bottom: none;
+  text-decoration: none;
+  text-shadow: none;
 }
 
 /* Chat Form */
@@ -1364,16 +1560,25 @@ body::after {
   to { transform: rotate(360deg); }
 }
 
-/* Tablet+ */
-/* Mobile: session tabs show numbers only */
+/* Mobile: session tabs show project name with truncation */
 @media (max-width: 767px) {
-  .session-tab .session-tab-name {
-    display: none;
-  }
   .session-tab {
     min-width: 32px;
-    justify-content: center;
+    max-width: 120px;
+    padding: 4px 8px;
   }
+
+  .session-tab .session-tab-number {
+    display: none;  /* Hide number, show only project name */
+  }
+
+  .session-tab .session-tab-name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100px;  /* Fit within tab max-width */
+  }
+
   .session-tab .close-tab {
     display: none !important;
   }
@@ -1752,5 +1957,39 @@ body::after {
   }
   #context-usage-bar {
     width: 40px;
+  }
+}
+
+/* Reduced Motion Preference */
+@media (prefers-reduced-motion: reduce) {
+  /* Disable streaming cursor blink */
+  .message.streaming::after {
+    animation: none;
+  }
+
+  /* Disable tool pill toggle rotation */
+  .tool-pill-toggle {
+    transition: none;
+  }
+  .tool-pill-toggle.expanded {
+    transform: none;
+  }
+
+  /* Reduce transition durations for new elements */
+  .message-header,
+  .message-id,
+  .model-badge,
+  .file-link,
+  .tool-duration,
+  .tool-details {
+    transition: none;
+  }
+
+  /* Keep hover states but remove transitions */
+  .message-id:hover {
+    background: rgba(184, 41, 255, 0.1);
+  }
+  .file-link:hover {
+    border-bottom-style: solid;
   }
 }
