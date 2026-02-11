@@ -33,6 +33,7 @@ function createSession(project, sessionId = null) {
     isStreaming: false,
     pendingText: '',
     pendingQuestion: null,
+    pendingPlanConfirmation: null,
     attachments: [],
     lastTokenUsage: null,
     lastContextWindow: null,
@@ -47,7 +48,10 @@ function createSession(project, sessionId = null) {
     fileMentionDebounceTimer: null,
     slashCommandSelectedIndex: -1,
     unreadCount: 0,
-    isAtBottom: true
+    isAtBottom: true,
+    // Task panel state (per-session)
+    tasks: [],                         // Active tasks array
+    taskPanelExpanded: false           // Task panel expand/collapse state
   };
 }
 
@@ -142,6 +146,7 @@ function switchToSession(index) {
   updateHash(newSession.project.name, newSession.sessionId);
   renderSessionBar();
   updateScrollFAB(newSession);
+  renderTaskPanel(); // Render task panel for the new session
   saveSessionState();
   if (!newSession.isStreaming) chatInput.focus();
 }
@@ -157,6 +162,9 @@ function closeSession(index) {
 
   // Clean up timers
   clearTimeout(session.fileMentionDebounceTimer);
+
+  // Clear tasks for this session
+  clearTasks(session);
 
   // Remove DOM container
   if (session.containerEl) session.containerEl.remove();
@@ -186,6 +194,194 @@ function closeSession(index) {
 
   saveSessionState();
 }
+
+// ==================== Task Panel Functions ====================
+
+function renderTaskPanel() {
+  const session = getActiveSession();
+  const taskPanel = document.getElementById('task-panel');
+  const taskList = document.getElementById('task-list');
+  const taskCount = document.querySelector('.task-panel-count');
+
+  if (!taskPanel || !taskList) return;
+
+  // Handle case where session doesn't exist or has no tasks
+  const tasks = session?.tasks || [];
+  const activeTasks = tasks.filter(t => t.status === 'running' || t.status === 'pending');
+  const completedTasks = tasks.filter(t => t.status === 'completed' || t.status === 'failed');
+
+  // Show/hide panel based on whether there are any tasks
+  if (tasks.length === 0) {
+    taskPanel.classList.remove('visible');
+    taskPanel.classList.add('hidden');
+    return;
+  }
+
+  taskPanel.classList.remove('hidden');
+  taskPanel.classList.add('visible');
+
+  // Update task count
+  if (taskCount) {
+    const count = activeTasks.length;
+    taskCount.textContent = count === 1 ? '1 active' : `${count} active`;
+  }
+
+  // Restore expanded state
+  if (session?.taskPanelExpanded) {
+    taskPanel.classList.add('expanded');
+    taskPanel.setAttribute('aria-expanded', 'true');
+  } else {
+    taskPanel.classList.remove('expanded');
+    taskPanel.setAttribute('aria-expanded', 'false');
+  }
+
+  // Render task list
+  if (tasks.length === 0) {
+    taskList.innerHTML = '<li class="task-empty">No active tasks</li>';
+    return;
+  }
+
+  // Sort: active tasks first, then by start time
+  const sortedTasks = [...tasks].sort((a, b) => {
+    const aActive = a.status === 'running' || a.status === 'pending';
+    const bActive = b.status === 'running' || b.status === 'pending';
+    if (aActive && !bActive) return -1;
+    if (!aActive && bActive) return 1;
+    return (b.startTime || 0) - (a.startTime || 0);
+  });
+
+  taskList.innerHTML = sortedTasks.map(task => {
+    const progressHtml = task.progress !== undefined && task.progress !== null
+      ? `<span class="task-progress">${Math.round(task.progress)}%</span>`
+      : '<span class="task-progress hidden"></span>';
+
+    return `
+      <li class="task-item" data-task-id="${escapeHtml(task.taskId)}" role="listitem">
+        <span class="task-status ${escapeHtml(task.status)}"></span>
+        <span class="task-title">${escapeHtml(task.title || 'Unknown task')}</span>
+        ${progressHtml}
+      </li>
+    `;
+  }).join('');
+}
+
+function toggleTaskPanel() {
+  const session = getActiveSession();
+  if (!session) return;
+
+  const taskPanel = document.getElementById('task-panel');
+  if (!taskPanel) return;
+
+  session.taskPanelExpanded = !session.taskPanelExpanded;
+
+  if (session.taskPanelExpanded) {
+    taskPanel.classList.add('expanded');
+    taskPanel.setAttribute('aria-expanded', 'true');
+  } else {
+    taskPanel.classList.remove('expanded');
+    taskPanel.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function expandTaskPanel() {
+  const session = getActiveSession();
+  if (!session) return;
+
+  const taskPanel = document.getElementById('task-panel');
+  if (!taskPanel) return;
+
+  session.taskPanelExpanded = true;
+  taskPanel.classList.add('expanded');
+  taskPanel.setAttribute('aria-expanded', 'true');
+}
+
+function collapseTaskPanel() {
+  const session = getActiveSession();
+  if (!session) return;
+
+  const taskPanel = document.getElementById('task-panel');
+  if (!taskPanel) return;
+
+  session.taskPanelExpanded = false;
+  taskPanel.classList.remove('expanded');
+  taskPanel.setAttribute('aria-expanded', 'false');
+}
+
+function addTask(session, taskData) {
+  if (!session) return;
+  if (!session.tasks) session.tasks = [];
+
+  // Check if task already exists
+  const existingIndex = session.tasks.findIndex(t => t.taskId === taskData.taskId);
+  if (existingIndex >= 0) {
+    // Update existing task
+    session.tasks[existingIndex] = { ...session.tasks[existingIndex], ...taskData };
+  } else {
+    // Add new task
+    session.tasks.push({
+      taskId: taskData.taskId,
+      title: taskData.title || 'Task',
+      status: taskData.status || 'pending',
+      progress: taskData.progress,
+      parentId: taskData.parentId || null,
+      startTime: taskData.startTime || Date.now()
+    });
+  }
+
+  // Only render if this is the active session
+  if (session === getActiveSession()) {
+    renderTaskPanel();
+  }
+}
+
+function updateTask(session, taskId, updates) {
+  if (!session || !session.tasks) return;
+
+  const taskIndex = session.tasks.findIndex(t => t.taskId === taskId);
+  if (taskIndex >= 0) {
+    session.tasks[taskIndex] = { ...session.tasks[taskIndex], ...updates };
+
+    // Only render if this is the active session
+    if (session === getActiveSession()) {
+      renderTaskPanel();
+    }
+  }
+}
+
+function removeTask(session, taskId) {
+  if (!session || !session.tasks) return;
+
+  session.tasks = session.tasks.filter(t => t.taskId !== taskId);
+
+  // Only render if this is the active session
+  if (session === getActiveSession()) {
+    renderTaskPanel();
+  }
+}
+
+function clearTasks(session) {
+  if (!session) return;
+
+  session.tasks = [];
+
+  // Only render if this is the active session
+  if (session === getActiveSession()) {
+    renderTaskPanel();
+  }
+}
+
+function syncTasks(session, tasks) {
+  if (!session) return;
+
+  session.tasks = tasks || [];
+
+  // Only render if this is the active session
+  if (session === getActiveSession()) {
+    renderTaskPanel();
+  }
+}
+
+// ==================== End Task Panel Functions ====================
 
 function saveSessionState() {
   const sessionData = state.sessions.map(s => ({
@@ -351,7 +547,6 @@ const attachmentPreviewEl = $('#attachment-preview');
 const dropZoneOverlay = $('#drop-zone-overlay');
 const fileInput = $('#file-input');
 const attachBtn = $('#attach-btn');
-const contextMenuEl = $('#message-context-menu');
 const contextBar = $('#context-bar');
 const contextModel = $('#context-model');
 const contextUsageFill = $('#context-usage-fill');
@@ -654,8 +849,18 @@ function checkAndReconnectActiveSessions() {
         type: 'check-active',
         sessionId: session.sessionId
       }));
+      // Request task sync for each active session
+      requestTaskSync(session.sessionId);
     }
   }
+}
+
+function requestTaskSync(sessionId) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  state.ws.send(JSON.stringify({
+    type: 'tasks-sync-request',
+    sessionId: sessionId
+  }));
 }
 
 function connectWebSocket() {
@@ -732,6 +937,8 @@ function handleWsMessage(msg) {
       break;
     case 'question-response-result':
       break;
+    case 'plan-response-result':
+      break;
     case 'error':
       appendSystemMessage(`Error: ${msg.message}`, session);
       sendNotification('Error', msg.message);
@@ -774,6 +981,64 @@ function handleWsMessage(msg) {
         }
       }
       break;
+    // Task panel WebSocket handlers
+    case 'task-started':
+      if (session && msg.data) {
+        addTask(session, {
+          taskId: msg.data.taskId,
+          title: msg.data.title,
+          status: 'running',
+          progress: msg.data.progress,
+          parentId: msg.data.parentId,
+          startTime: msg.data.startTime || Date.now()
+        });
+      }
+      break;
+    case 'task-progress':
+      if (session && msg.data) {
+        updateTask(session, msg.data.taskId, {
+          status: 'running',
+          progress: msg.data.progress
+        });
+      }
+      break;
+    case 'task-completed':
+      if (session && msg.data) {
+        updateTask(session, msg.data.taskId, {
+          status: 'completed',
+          progress: 100
+        });
+        // Auto-remove completed tasks after a delay
+        setTimeout(() => {
+          removeTask(session, msg.data.taskId);
+        }, 3000);
+      }
+      break;
+    case 'task-failed':
+      if (session && msg.data) {
+        updateTask(session, msg.data.taskId, {
+          status: 'failed',
+          error: msg.data.error
+        });
+      }
+      break;
+    case 'task-update':
+      if (session && msg.data) {
+        addTask(session, {
+          taskId: msg.data.taskId,
+          title: msg.data.title,
+          status: msg.data.status || 'pending',
+          progress: msg.data.progress,
+          parentId: msg.data.parentId,
+          startTime: msg.data.startTime || Date.now()
+        });
+      }
+      break;
+    case 'tasks-sync':
+      if (session && msg.data) {
+        syncTasks(session, msg.data.tasks || []);
+      }
+      break;
     case 'pong':
       break;
     default:
@@ -808,6 +1073,17 @@ function handleClaudeMessage(data, session) {
       selectedAnswers: {}
     };
     renderQuestion(data, session);
+    return;
+  }
+
+  if (data.type === 'plan-confirmation') {
+    // Ignore duplicate plan confirmations
+    if (session.pendingPlanConfirmation) return;
+    flushPendingText(session);
+    session.pendingPlanConfirmation = {
+      id: data.id
+    };
+    renderPlanConfirmation(data, session);
     return;
   }
 
@@ -881,6 +1157,7 @@ function finishStreaming(session) {
   session = session || getActiveSession();
   if (!session) return;
   session.isStreaming = false;
+  session.pendingPlanConfirmation = null;
   flushPendingText(session);
 
   // Only update UI controls if this is the active session
@@ -907,10 +1184,18 @@ function finishStreaming(session) {
       }
       session.pendingQuestion = null;
     }
+    // Also clean up any pending plan confirmation
+    if (session.pendingPlanConfirmation) {
+      const planBlock = session.containerEl.querySelector('.plan-confirmation-block:not(.submitted)');
+      if (planBlock) {
+        markPlanConfirmationSubmitted(planBlock, 'rejected');
+      }
+      session.pendingPlanConfirmation = null;
+    }
   }
 }
 
-function appendMessage(role, content, session) {
+function appendMessage(role, content, session, attachments = null) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
   removeWelcome(session);
@@ -946,6 +1231,17 @@ function appendMessage(role, content, session) {
     if (timestamp) div.dataset.timestamp = timestamp;
     if (messageId) div.dataset.messageId = messageId;
     if (model) div.dataset.model = model;
+  } else if (role === 'user' && attachments && attachments.length > 0) {
+    // Render user message with image attachments
+    const imageAttachments = attachments.filter(att => att.type === 'image');
+    let contentHtml = escapeHtml(content);
+    if (imageAttachments.length > 0) {
+      const imagesHtml = imageAttachments.map(att =>
+        `<img src="${att.data}" alt="${escapeAttr(att.name)}" class="message-image">`
+      ).join('');
+      contentHtml += `<div class="message-images">${imagesHtml}</div>`;
+    }
+    div.innerHTML = contentHtml;
   } else {
     div.innerHTML = escapeHtml(content);
   }
@@ -1029,7 +1325,9 @@ function getToolIcon(tool) {
     'Edit': 'E',
     'Glob': 'G',
     'Grep': '?',
-    'Task': 'T'
+    'Task': 'T',
+    'TodoWrite': '✓',
+    'Todowrite': '✓'
   };
   return icons[tool] || '*';
 }
@@ -1082,6 +1380,20 @@ function appendToolMessage(tool, summary, id, status, session, metadata = null) 
       detailsHtml += `<div class="tool-full-query"><strong>Query:</strong> <code>${escapeHtml(summaryObj.fullQuery)}</code></div>`;
     } else if (summaryObj.pattern) {
       detailsHtml += `<div class="tool-pattern"><strong>Pattern:</strong> <code>${escapeHtml(summaryObj.pattern)}</code></div>`;
+    }
+    if (summaryObj.taskDescription) {
+      detailsHtml += `<div class="tool-task-description"><strong>Task:</strong> <span>${escapeHtml(summaryObj.taskDescription)}</span></div>`;
+    }
+    if (summaryObj.todos && summaryObj.todos.length > 0) {
+      detailsHtml += '<div class="tool-todos"><strong>Todos:</strong><ul class="todo-list">';
+      for (const todo of summaryObj.todos) {
+        const status = todo.status || 'pending';
+        const isCompleted = status === 'completed' || status === 'done';
+        const statusClass = isCompleted ? 'completed' : 'pending';
+        const content = todo.content || todo.text || todo.description || '';
+        detailsHtml += `<li class="todo-item ${statusClass}"><span class="todo-status"></span><span class="todo-content">${escapeHtml(content)}</span></li>`;
+      }
+      detailsHtml += '</ul></div>';
     }
     detailsHtml += '</div>';
   }
@@ -1215,6 +1527,64 @@ function renderQuestion(data, session) {
   scrollToBottom(session);
 }
 
+function renderPlanConfirmation(data, session) {
+  if (!session || !session.containerEl) return;
+
+  const div = document.createElement('div');
+  div.className = 'message plan-confirmation-block';
+  div.dataset.confirmationId = data.id;
+
+  div.innerHTML = `
+    <div class="plan-confirmation-header">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 11l3 3L22 4"/>
+        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+      </svg>
+      <span>Plan complete. Ready to implement?</span>
+    </div>
+    <div class="plan-confirmation-actions">
+      <button class="plan-confirm-btn plan-approve-btn" data-action="approve">Approve Plan</button>
+      <button class="plan-confirm-btn plan-reject-btn" data-action="reject">Reject &amp; Revise</button>
+    </div>
+    <div class="plan-feedback-container hidden">
+      <input type="text" class="plan-feedback-input" placeholder="What should be revised? (optional)">
+      <button class="plan-confirm-btn plan-send-feedback-btn">Send Feedback</button>
+    </div>
+  `;
+
+  // Approve button handler
+  div.querySelector('.plan-approve-btn').addEventListener('click', () => {
+    sendPlanResponse(session, data.id, true, null);
+    markPlanConfirmationSubmitted(div, 'approved');
+  });
+
+  // Reject button handler - shows feedback input
+  div.querySelector('.plan-reject-btn').addEventListener('click', () => {
+    div.querySelector('.plan-feedback-container').classList.remove('hidden');
+    div.querySelector('.plan-reject-btn').classList.add('hidden');
+    div.querySelector('.plan-feedback-input').focus();
+  });
+
+  // Send feedback button handler
+  div.querySelector('.plan-send-feedback-btn').addEventListener('click', () => {
+    const feedback = div.querySelector('.plan-feedback-input').value.trim();
+    sendPlanResponse(session, data.id, false, feedback || null);
+    markPlanConfirmationSubmitted(div, 'rejected');
+  });
+
+  // Also allow Enter key on feedback input
+  div.querySelector('.plan-feedback-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const feedback = e.target.value.trim();
+      sendPlanResponse(session, data.id, false, feedback || null);
+      markPlanConfirmationSubmitted(div, 'rejected');
+    }
+  });
+
+  session.containerEl.appendChild(div);
+  scrollToBottom(session);
+}
+
 function handleOptionSelect(optionEl) {
   const qIndex = parseInt(optionEl.dataset.qindex);
   const label = optionEl.dataset.label;
@@ -1328,6 +1698,25 @@ function submitQuestionResponse() {
   session.pendingQuestion = null;
 }
 
+function sendPlanResponse(session, toolUseId, approved, feedback) {
+  if (!session || !session.sessionId || !state.ws) return;
+  state.ws.send(JSON.stringify({
+    type: 'plan-response',
+    sessionId: session.sessionId,
+    toolUseId: toolUseId,
+    approved: approved,
+    feedback: feedback
+  }));
+}
+
+function markPlanConfirmationSubmitted(element, status) {
+  element.classList.add('submitted');
+  const actions = element.querySelector('.plan-confirmation-actions');
+  const feedbackContainer = element.querySelector('.plan-feedback-container');
+  if (actions) actions.innerHTML = `<span class="plan-status plan-status-${status}">${status === 'approved' ? 'Plan approved' : 'Plan rejected — revising...'}</span>`;
+  if (feedbackContainer) feedbackContainer.classList.add('hidden');
+}
+
 function removeWelcome(session) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
@@ -1439,9 +1828,9 @@ function sendMessage(content) {
 
   state.ws.send(JSON.stringify(message));
 
-  // Show attachments in user message display
+  // Show user message with attachments displayed as images
   const displayContent = formatUserMessageWithAttachments(content, session.attachments);
-  appendMessage('user', displayContent, session);
+  appendMessage('user', displayContent, session, session.attachments);
 
   // Clear attachments after sending
   session.attachments = [];
@@ -1534,7 +1923,21 @@ sessionTabsEl.addEventListener('click', (e) => {
   }
   const tab = e.target.closest('.session-tab');
   if (tab) {
+    // On mobile: first tap shows close button, second tap switches session
+    const isMobile = window.matchMedia('(max-width: 767px)').matches;
+    if (isMobile && !tab.classList.contains('show-close')) {
+      sessionTabsEl.querySelectorAll('.session-tab').forEach(t => t.classList.remove('show-close'));
+      tab.classList.add('show-close');
+      return;
+    }
     switchToSession(parseInt(tab.dataset.index));
+  }
+});
+
+// Dismiss close button when tapping outside session tabs on mobile
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#session-bar')) {
+    document.querySelectorAll('.session-tab.show-close').forEach(t => t.classList.remove('show-close'));
   }
 });
 
@@ -1600,72 +2003,6 @@ if (window.visualViewport) {
     }
   });
 }
-
-// Long-press to copy message
-let longPressTimer = null;
-let longPressTarget = null;
-
-sessionContainersEl.addEventListener('touchstart', (e) => {
-  const msgEl = e.target.closest('.message');
-  if (!msgEl) return;
-  longPressTarget = msgEl;
-  longPressTimer = setTimeout(() => {
-    showContextMenu(msgEl, e.touches[0].clientX, e.touches[0].clientY);
-  }, 500);
-}, { passive: true });
-
-sessionContainersEl.addEventListener('touchend', () => {
-  clearTimeout(longPressTimer);
-  longPressTimer = null;
-});
-
-sessionContainersEl.addEventListener('touchmove', () => {
-  clearTimeout(longPressTimer);
-  longPressTimer = null;
-});
-
-// Desktop: right-click on messages
-sessionContainersEl.addEventListener('contextmenu', (e) => {
-  const msgEl = e.target.closest('.message');
-  if (!msgEl) return;
-  e.preventDefault();
-  showContextMenu(msgEl, e.clientX, e.clientY);
-});
-
-function showContextMenu(msgEl, x, y) {
-  longPressTarget = msgEl;
-  const hasCode = msgEl.querySelector('pre code');
-  const copyCodeBtn = contextMenuEl.querySelector('[data-action="copy-code"]');
-  copyCodeBtn.style.display = hasCode ? '' : 'none';
-  contextMenuEl.style.left = Math.min(x, window.innerWidth - 160) + 'px';
-  contextMenuEl.style.top = Math.min(y, window.innerHeight - 100) + 'px';
-  contextMenuEl.classList.remove('hidden');
-}
-
-document.addEventListener('click', () => {
-  contextMenuEl.classList.add('hidden');
-});
-document.addEventListener('touchstart', (e) => {
-  if (!contextMenuEl.contains(e.target)) {
-    contextMenuEl.classList.add('hidden');
-  }
-}, { passive: true });
-
-contextMenuEl.addEventListener('click', (e) => {
-  const action = e.target.closest('.ctx-menu-item')?.dataset.action;
-  if (!action || !longPressTarget) return;
-
-  if (action === 'copy-text') {
-    navigator.clipboard.writeText(longPressTarget.textContent);
-  } else if (action === 'copy-code') {
-    const codeEls = longPressTarget.querySelectorAll('pre code');
-    const codeText = Array.from(codeEls).map(el => el.textContent).join('\n\n');
-    navigator.clipboard.writeText(codeText);
-  }
-
-  contextMenuEl.classList.add('hidden');
-  longPressTarget = null;
-});
 
 function handleSlashCommandInput() {
   const value = chatInput.value;
@@ -2001,6 +2338,18 @@ function selectFileMention(filePath) {
 
 // Mode button functions
 function cycleMode() {
+  // If switching away from plan mode while confirmation is pending, auto-deny
+  const activeSession = getActiveSession();
+  if (activeSession && activeSession.pendingPlanConfirmation) {
+    sendPlanResponse(activeSession, activeSession.pendingPlanConfirmation.id, false, 'Mode changed');
+    activeSession.pendingPlanConfirmation = null;
+    if (activeSession.containerEl) {
+      const planBlock = activeSession.containerEl.querySelector('.plan-confirmation-block:not(.submitted)');
+      if (planBlock) {
+        markPlanConfirmationSubmitted(planBlock, 'rejected');
+      }
+    }
+  }
   state.modeIndex = (state.modeIndex + 1) % MODES.length;
   state.currentMode = MODES[state.modeIndex].name;
   updateModeButton();
@@ -2055,6 +2404,14 @@ function closeSidebar() {
 menuBtn.addEventListener('click', openSidebar);
 closeSidebarBtn.addEventListener('click', closeSidebar);
 sidebarOverlay.addEventListener('click', closeSidebar);
+
+// Task panel toggle button
+document.addEventListener('DOMContentLoaded', () => {
+  const taskPanelToggle = document.getElementById('task-panel-toggle');
+  if (taskPanelToggle) {
+    taskPanelToggle.addEventListener('click', toggleTaskPanel);
+  }
+});
 
 projectSearch.addEventListener('input', () => {
   clearTimeout(state.searchTimeout);
@@ -2150,6 +2507,7 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
     activeSession.isStreaming = false;
     activeSession.pendingText = '';
     activeSession.pendingQuestion = null;
+    activeSession.pendingPlanConfirmation = null;
     activeSession.attachments = [];
     activeSession.lastTokenUsage = null;
     activeSession.lastContextWindow = null;
