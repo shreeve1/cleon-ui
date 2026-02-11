@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { taskManager, broadcastTaskUpdate } from './tasks.js';
 
 // Constants
 const DEFAULT_CONTEXT_WINDOW = 200000;
@@ -28,11 +29,19 @@ const activeSessions = new Map();
 // Used by canUseTool callback to wait for user responses to AskUserQuestion
 const pendingQuestionCallbacks = new Map();
 
+// Track pending plan confirmations - map of toolUseId -> { resolve, reject }
+// Used by canUseTool callback to wait for user confirmation of ExitPlanMode
+const pendingPlanConfirmations = new Map();
+
 // Track tool execution start times - map of toolUseId -> startTime (Date)
 const toolStartTimes = new Map();
 
 // Track current model per session - map of sessionId -> model
 const sessionModels = new Map();
+
+// Track tool use to task mapping - map of toolUseId -> taskId
+// Used to complete tasks when tool results arrive
+const toolUseToTaskMap = new Map();
 
 /**
  * Process messages from a query stream
@@ -61,9 +70,9 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
       }
     }
 
-    // Transform and forward message (pass current model)
+    // Transform and forward message (pass current model, sessionId, and ws for task tracking)
     const currentModel = message.session_id ? sessionModels.get(message.session_id) : null;
-    const transformed = transformMessage(message, currentModel);
+    const transformed = transformMessage(message, currentModel, message.session_id, sessionInfo.ws);
     if (transformed) {
       sendMessage(sessionInfo.ws, {
         type: 'claude-message',
@@ -182,6 +191,56 @@ export async function handleChat(msg, ws) {
         }
       }
 
+      // Intercept ExitPlanMode to wait for user confirmation
+      if (toolName === 'ExitPlanMode') {
+        console.log(`[Claude] ExitPlanMode intercepted - toolUseId: ${toolUseID}`);
+
+        // Send confirmation request to frontend
+        sendMessage(sessionInfo.ws, {
+          type: 'claude-message',
+          sessionId: currentSessionId,
+          data: {
+            type: 'plan-confirmation',
+            id: toolUseID
+          }
+        });
+
+        // Wait for user approval/rejection
+        try {
+          const response = await new Promise((resolve, reject) => {
+            pendingPlanConfirmations.set(toolUseID, { resolve, reject });
+
+            // Handle abort signal
+            signal.addEventListener('abort', () => {
+              pendingPlanConfirmations.delete(toolUseID);
+              reject(new Error('Plan confirmation cancelled'));
+            });
+          });
+
+          console.log(`[Claude] Plan confirmation response - toolUseId: ${toolUseID}, approved: ${response.approved}`);
+
+          if (response.approved) {
+            return {
+              behavior: 'allow',
+              updatedInput: input
+            };
+          } else {
+            return {
+              behavior: 'deny',
+              message: response.feedback
+                ? `User rejected the plan. Feedback: ${response.feedback}`
+                : 'User rejected the plan. Please revise.'
+            };
+          }
+        } catch (err) {
+          console.log(`[Claude] Plan confirmation cancelled or error: ${err.message}`);
+          return {
+            behavior: 'deny',
+            message: 'Plan confirmation cancelled'
+          };
+        }
+      }
+
       // Allow all other tools
       return {
         behavior: 'allow',
@@ -259,6 +318,21 @@ export async function handleChat(msg, ws) {
   } finally {
     if (currentSessionId) {
       activeSessions.delete(currentSessionId);
+      // Clean up tasks for this session
+      taskManager.clearSession(currentSessionId);
+      // Clean up tool use to task mappings for this session
+      for (const [toolUseId, taskId] of toolUseToTaskMap) {
+        const task = taskManager.getTask(currentSessionId, taskId);
+        if (task) {
+          toolUseToTaskMap.delete(toolUseId);
+        }
+      }
+
+      // Clean up any pending plan confirmations for this session
+      for (const [toolUseId, callback] of pendingPlanConfirmations) {
+        callback.reject(new Error('Session ended'));
+        pendingPlanConfirmations.delete(toolUseId);
+      }
     }
 
     // Clean up temp image files
@@ -289,8 +363,17 @@ export async function handleAbort(sessionId) {
     if (typeof sessionInfo.queryInstance.interrupt === 'function') {
       await sessionInfo.queryInstance.interrupt();
     }
-    
+
     activeSessions.delete(sessionId);
+    // Clean up tasks for this session
+    taskManager.clearSession(sessionId);
+    // Clean up tool use to task mappings for this session
+    for (const [toolUseId, taskId] of toolUseToTaskMap) {
+      const task = taskManager.getTask(sessionId, taskId);
+      if (task) {
+        toolUseToTaskMap.delete(toolUseId);
+      }
+    }
     return true;
 
   } catch (err) {
@@ -341,6 +424,25 @@ export async function handleQuestionResponse(sessionId, toolUseId, answers) {
 }
 
 /**
+ * Handle plan confirmation response from frontend
+ * Resolves the pending promise from the canUseTool callback
+ */
+export async function handlePlanResponse(sessionId, toolUseId, approved, feedback) {
+  console.log(`[Claude] Received plan response for tool ${toolUseId}, approved: ${approved}`);
+
+  const callback = pendingPlanConfirmations.get(toolUseId);
+  if (!callback) {
+    console.log(`[Claude] No pending plan callback found for toolUseId: ${toolUseId}`);
+    return false;
+  }
+
+  pendingPlanConfirmations.delete(toolUseId);
+  callback.resolve({ approved, feedback });
+
+  return true;
+}
+
+/**
  * Send message to WebSocket (handles stringify + error checking)
  */
 function sendMessage(ws, data) {
@@ -360,8 +462,9 @@ function generateTimestamp() {
  * Adds timestamp and message ID to all message types for tracking
  * Tracks tool execution timing for performance monitoring
  * Includes model information when available
+ * Creates/completes tasks for tool execution
  */
-function transformMessage(msg, model = null) {
+function transformMessage(msg, model = null, sessionId = null, ws = null) {
   if (!msg || !msg.type) return null;
 
   // Common metadata for all messages
@@ -401,6 +504,11 @@ function transformMessage(msg, model = null) {
           return null;
         }
 
+        // Skip ExitPlanMode - it's handled by canUseTool callback
+        if (toolUse.name === 'ExitPlanMode') {
+          return null;
+        }
+
         // Record start time for this tool
         const startTime = new Date();
         toolStartTimes.set(toolUse.id, startTime);
@@ -409,6 +517,33 @@ function transformMessage(msg, model = null) {
         if (toolStartTimes.size > 100) {
           const firstKey = toolStartTimes.keys().next().value;
           toolStartTimes.delete(firstKey);
+        }
+
+        // Create a task for this tool execution
+        if (sessionId && ws) {
+          const summary = getToolSummary(toolUse.name, toolUse.input);
+          const taskTitle = typeof summary === 'object' ? summary.summary : summary;
+          const task = taskManager.trackTaskStart(sessionId, {
+            title: taskTitle,
+            progress: 0,
+            metadata: {
+              tool: toolUse.name,
+              toolUseId: toolUse.id,
+              input: toolUse.input
+            }
+          });
+
+          // Map toolUseId to taskId for completion
+          toolUseToTaskMap.set(toolUse.id, task.taskId);
+
+          // Broadcast task started
+          broadcastTaskUpdate(ws, 'task-started', task);
+
+          // Clean up old mappings (keep last 100)
+          if (toolUseToTaskMap.size > 100) {
+            const firstKey = toolUseToTaskMap.keys().next().value;
+            toolUseToTaskMap.delete(firstKey);
+          }
         }
 
         const result = {
@@ -451,12 +586,7 @@ function transformMessage(msg, model = null) {
     }
   }
 
-  // User message echo (for context)
-  if (msg.type === 'user') {
-    return null; // Don't echo back, frontend already shows it
-  }
-
-  // Tool result
+  // Tool result (check before generic user return)
   if (msg.type === 'user' && msg.message?.content) {
     const content = msg.message.content;
     if (Array.isArray(content)) {
@@ -474,6 +604,31 @@ function transformMessage(msg, model = null) {
           startTimeIso = startTime.toISOString();
           // Clean up after use
           toolStartTimes.delete(toolUseId);
+        }
+
+        // Complete or fail the task
+        if (sessionId && ws) {
+          const taskId = toolUseToTaskMap.get(toolUseId);
+          if (taskId) {
+            let task;
+            if (toolResult.is_error) {
+              task = taskManager.trackTaskFailed(sessionId, taskId, toolResult.content);
+              if (task) {
+                broadcastTaskUpdate(ws, 'task-failed', task);
+              }
+            } else {
+              task = taskManager.trackTaskComplete(sessionId, taskId, {
+                output: typeof toolResult.content === 'string'
+                  ? toolResult.content
+                  : JSON.stringify(toolResult.content)
+              });
+              if (task) {
+                broadcastTaskUpdate(ws, 'task-completed', task);
+              }
+            }
+            // Clean up mapping
+            toolUseToTaskMap.delete(toolUseId);
+          }
         }
 
         const result = {
@@ -495,6 +650,11 @@ function transformMessage(msg, model = null) {
         return result;
       }
     }
+  }
+
+  // User message echo - only reached if NOT a tool_result
+  if (msg.type === 'user') {
+    return null; // Don't echo back, frontend already shows it
   }
 
   // Result message (end of turn)
@@ -552,9 +712,34 @@ const toolFormatters = {
       fullQuery: fullQuery
     };
   },
-  todowrite: () => ({ summary: 'Updating todo list' }),
+  todowrite: (i) => {
+    const todos = i.todos || [];
+    const todoCount = todos.length;
+    const completedCount = todos.filter(t => t.status === 'completed' || t.status === 'done').length;
+    return {
+      summary: todoCount === 0 ? 'Updating todo list' : `Updating todo list (${completedCount}/${todoCount} completed)`,
+      todos: todos,
+      todoCount: todoCount,
+      completedCount: completedCount
+    };
+  },
   todoread: () => ({ summary: 'Reading todo list' }),
-  task: () => ({ summary: 'Delegating task' })
+  task: (i) => {
+    const description = i.prompt || i.task || i.description || '';
+    return {
+      summary: description
+        ? `Task: ${truncateOutput(description, TOOL_SUMMARY_TRUNCATE_LENGTH)}`
+        : 'Delegating task',
+      taskDescription: description
+    };
+  },
+  taskoutput: (i) => {
+    const taskId = i.task_id || '';
+    return {
+      summary: taskId ? `Checking task ${taskId}` : 'Checking task output',
+      taskId
+    };
+  }
 };
 
 /**

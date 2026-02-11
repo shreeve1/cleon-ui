@@ -98,7 +98,28 @@ function transformMessage(msg) {
     }
   }
 
-  // User message echo
+  // Tool result (check before generic user return)
+  if (msg.type === 'user' && msg.message?.content) {
+    const content = msg.message.content;
+    if (Array.isArray(content)) {
+      const toolResult = content.find(c => c.type === 'tool_result');
+      if (toolResult) {
+        return {
+          type: 'tool_result',
+          id: toolResult.tool_use_id,
+          success: !toolResult.is_error,
+          output: truncateOutput(
+            typeof toolResult.content === 'string'
+              ? toolResult.content
+              : JSON.stringify(toolResult.content),
+            TOOL_OUTPUT_TRUNCATE_LENGTH
+          )
+        };
+      }
+    }
+  }
+
+  // User message echo - only reached if NOT a tool_result
   if (msg.type === 'user') {
     return null;
   }
@@ -127,8 +148,10 @@ describe('Static Analysis - server/claude.js structure', () => {
     expect(claudeJs).toContain('const TOOL_SUMMARY_TRUNCATE_LENGTH = 100;');
   });
 
-  it('extractTokenUsage returns { used, contextWindow, model }', () => {
-    expect(claudeJs).toContain('return { used, contextWindow, model: modelKey };');
+  it('extractTokenUsage returns object with used, contextWindow, and model fields', () => {
+    expect(claudeJs).toContain('used: cumulativeTotal');
+    expect(claudeJs).toContain('contextWindow,');
+    expect(claudeJs).toContain('model: modelKey,');
   });
 
   it('extractTokenUsage aggregates all four token types', () => {
@@ -168,8 +191,10 @@ describe('Static Analysis - server/claude.js structure', () => {
 
   it('tool formatters cover all expected tools', () => {
     const formattersStart = claudeJs.indexOf('const toolFormatters = {');
-    const formattersEnd = claudeJs.indexOf('};', formattersStart);
-    const formattersBlock = claudeJs.slice(formattersStart, formattersEnd);
+    // Find the closing }; that follows the last formatter by searching for
+    // the next function declaration after toolFormatters
+    const nextFnStart = claudeJs.indexOf('function getToolSummary', formattersStart);
+    const formattersBlock = claudeJs.slice(formattersStart, nextFnStart);
 
     expect(formattersBlock).toContain('bash:');
     expect(formattersBlock).toContain('read:');
@@ -180,6 +205,7 @@ describe('Static Analysis - server/claude.js structure', () => {
     expect(formattersBlock).toContain('todowrite:');
     expect(formattersBlock).toContain('todoread:');
     expect(formattersBlock).toContain('task:');
+    expect(formattersBlock).toContain('taskoutput:');
   });
 });
 
