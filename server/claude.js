@@ -4,11 +4,12 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import { taskManager, broadcastTaskUpdate } from './tasks.js';
+import { broadcastToSession, subscribeToSession, clearSessionSubscribers, startSessionBuffer } from './broadcast.js';
 
 // Constants
 const DEFAULT_CONTEXT_WINDOW = 200000;
-const TOOL_OUTPUT_TRUNCATE_LENGTH = 500;
-const TOOL_SUMMARY_TRUNCATE_LENGTH = 100;
+const TOOL_OUTPUT_TRUNCATE_LENGTH = 1500;
+const TOOL_SUMMARY_TRUNCATE_LENGTH = 200;
 
 // Model-specific context window sizes
 const MODEL_CONTEXT_WINDOWS = {
@@ -287,13 +288,17 @@ export async function handleChat(msg, ws) {
     // Track for abort
     if (currentSessionId) {
       activeSessions.set(currentSessionId, sessionInfo);
+      startSessionBuffer(currentSessionId);
+      subscribeToSession(currentSessionId, ws);
     }
 
     // Process streaming messages
     await processQueryStream(queryInstance, ws, sessionInfo, (sid) => {
       if (!currentSessionId) {
         currentSessionId = sid;
+        startSessionBuffer(currentSessionId);
         activeSessions.set(currentSessionId, sessionInfo);
+        subscribeToSession(currentSessionId, ws);
         sendMessage(sessionInfo.ws, {
           type: 'session-created',
           sessionId: currentSessionId
@@ -318,6 +323,8 @@ export async function handleChat(msg, ws) {
   } finally {
     if (currentSessionId) {
       activeSessions.delete(currentSessionId);
+      // Clean up all subscribers for this session
+      clearSessionSubscribers(currentSessionId);
       // Clean up tasks for this session
       taskManager.clearSession(currentSessionId);
       // Clean up tool use to task mappings for this session
@@ -365,6 +372,8 @@ export async function handleAbort(sessionId) {
     }
 
     activeSessions.delete(sessionId);
+    // Clean up all subscribers for this session
+    clearSessionSubscribers(sessionId);
     // Clean up tasks for this session
     taskManager.clearSession(sessionId);
     // Clean up tool use to task mappings for this session
@@ -379,6 +388,8 @@ export async function handleAbort(sessionId) {
   } catch (err) {
     console.error(`[Claude] Abort error for ${sessionId}:`, err);
     activeSessions.delete(sessionId);
+    // Still clean up subscribers even on error
+    clearSessionSubscribers(sessionId);
     return false;
   }
 }
@@ -398,6 +409,10 @@ export function resubscribeSession(sessionId, newWs) {
   const sessionInfo = activeSessions.get(sessionId);
   if (!sessionInfo) return false;
   sessionInfo.ws = newWs;
+
+  // Also subscribe to broadcast manager for multi-user support
+  subscribeToSession(sessionId, newWs);
+
   return true;
 }
 
@@ -444,10 +459,17 @@ export async function handlePlanResponse(sessionId, toolUseId, approved, feedbac
 
 /**
  * Send message to WebSocket (handles stringify + error checking)
+ * Broadcasts to all session subscribers if sessionId is present
  */
 function sendMessage(ws, data) {
-  if (ws.readyState === 1) { // WebSocket.OPEN
-    ws.send(JSON.stringify(data));
+  if (data.sessionId) {
+    // Broadcast to all subscribers (includes originating WS if subscribed)
+    broadcastToSession(data.sessionId, data);
+  } else {
+    // No sessionId - fall back to direct send (for messages without sessions)
+    if (ws.readyState === 1) { // WebSocket.OPEN
+      ws.send(JSON.stringify(data));
+    }
   }
 }
 
@@ -553,7 +575,8 @@ function transformMessage(msg, model = null, sessionId = null, ws = null) {
           summary: getToolSummary(toolUse.name, toolUse.input),
           timestamp,
           messageId,
-          startTime: startTime.toISOString()
+          startTime: startTime.toISOString(),
+          input: sanitizeToolInput(toolUse.name, toolUse.input)
         };
         // Add model if available
         if (model) {
@@ -665,6 +688,49 @@ function transformMessage(msg, model = null, sessionId = null, ws = null) {
   return null;
 }
 
+/**
+ * Sanitize bash command - redact secrets and truncate
+ */
+function sanitizeBashCommand(cmd) {
+  if (!cmd || typeof cmd !== 'string') return '';
+  let sanitized = cmd
+    .replace(/(-H\s+["']?Authorization:\s*Bearer\s+)[^\s"']+/gi, '$1[REDACTED]')
+    .replace(/(Bearer\s+)[A-Za-z0-9_\-\.]{20,}/g, '$1[REDACTED]')
+    .replace(/(-u\s+)[^\s:]+:[^\s@]+(@)/g, '$1[REDACTED]$2')
+    .replace(/(https?:\/\/)[^:@\s]+:[^:@\s]+(@)/g, '$1[REDACTED]$2')
+    .replace(/((?:API_KEY|SECRET|TOKEN|PASSWORD|PASS)\s*=\s*)[^\s;]+/gi, '$1[REDACTED]');
+  return truncateOutput(sanitized, 200);
+}
+
+/**
+ * Sanitize tool input for client consumption
+ */
+function sanitizeToolInput(tool, input) {
+  if (!input) return {};
+
+  const normalizedTool = tool.toLowerCase();
+  switch (normalizedTool) {
+    case 'bash':
+      return { command: sanitizeBashCommand(input.command || input.cmd || '') };
+    case 'read':
+      return { file_path: input.file_path || input.path, offset: input.offset, limit: input.limit };
+    case 'write':
+      return { file_path: input.file_path || input.path };
+    case 'edit':
+      const oldStr = String(input.old_string || '').slice(0, 30);
+      const newStr = String(input.new_string || '').slice(0, 30);
+      return { file_path: input.file_path || input.path, old_string: oldStr, new_string: newStr };
+    case 'glob':
+      return { pattern: input.pattern, path: input.path };
+    case 'grep':
+      return { pattern: input.pattern, path: input.path, glob: input.glob, type: input.type };
+    case 'task':
+      return { description: input.description || input.prompt, subagent_type: input.subagent_type };
+    default:
+      return {};
+  }
+}
+
 // Tool summary formatters (data-driven approach)
 // Returns object with summary string and full command details
 const toolFormatters = {
@@ -725,7 +791,7 @@ const toolFormatters = {
   },
   todoread: () => ({ summary: 'Reading todo list' }),
   task: (i) => {
-    const description = i.prompt || i.task || i.description || '';
+    const description = i?.prompt || i?.task || i?.description || '';
     return {
       summary: description
         ? `Task: ${truncateOutput(description, TOOL_SUMMARY_TRUNCATE_LENGTH)}`
@@ -734,7 +800,7 @@ const toolFormatters = {
     };
   },
   taskoutput: (i) => {
-    const taskId = i.task_id || '';
+    const taskId = i?.task_id || '';
     return {
       summary: taskId ? `Checking task ${taskId}` : 'Checking task output',
       taskId

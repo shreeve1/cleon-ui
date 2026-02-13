@@ -8,6 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Cleon UI</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29/themes/prism-tomorrow.min.css">
 </head>
 <body>
   <div id="app">
@@ -101,6 +102,16 @@
           <div id="session-tabs"></div>
           <button id="new-session-tab-btn" class="session-tab-btn" title="New session">+</button>
         </div>
+        <div id="skills-bar">
+          <button class="skill-btn" data-command="/question" data-color="red">question</button>
+          <button class="skill-btn" data-command="/brainstorm" data-color="purple">brainstorm</button>
+          <button class="skill-btn" data-command="/plan" data-color="cyan">plan</button>
+          <button class="skill-btn" data-command="/validate" data-color="orange">validate</button>
+          <button class="skill-btn" data-command="/build" data-color="green">build</button>
+          <button class="skill-btn" data-command="/test" data-color="blue">test</button>
+          <button class="skill-btn" data-command="/document" data-color="red">document</button>
+          <button class="skill-btn" data-command="/clear" data-color="purple">clear</button>
+        </div>
         <form id="chat-form">
           <div id="slash-commands" class="hidden"></div>
           <div id="file-mentions" class="hidden"></div>
@@ -130,6 +141,15 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-javascript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-css.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-typescript.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

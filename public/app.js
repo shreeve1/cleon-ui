@@ -21,7 +21,8 @@ const state = {
   searchTimeout: null,
   customCommands: [],
   sessionsRestored: false,
-  forceNewTab: false
+  forceNewTab: false,
+  currentSubscribedSessionId: null  // Track which session we're subscribed to for multi-user sync
 };
 
 // Session object factory
@@ -31,6 +32,7 @@ function createSession(project, sessionId = null) {
     sessionId: sessionId,              // Claude SDK session ID (null = new)
     project: project,                  // { name, path, displayName }
     isStreaming: false,
+    isReplaying: false,
     pendingText: '',
     pendingQuestion: null,
     pendingPlanConfirmation: null,
@@ -41,6 +43,7 @@ function createSession(project, sessionId = null) {
     hasUnread: false,
     needsHistoryLoad: false,
     containerEl: null,                 // DOM reference
+    streamingRenderer: null,           // StreamingRenderer instance
     // File mention state (per-session)
     fileMentionSelectedIndex: 0,
     fileMentionQuery: '',
@@ -66,6 +69,109 @@ function getSessionByInternalId(id) {
 
 function getSessionBySessionId(sessionId) {
   return state.sessions.find(s => s.sessionId === sessionId) || null;
+}
+
+// Markdown renderer initialization
+let markdownInitialized = false;
+
+function initializeMarkdownRenderer() {
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return false;
+
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+    headerIds: false,
+    highlight: function(code, lang) {
+      if (typeof Prism !== 'undefined' && Prism.languages[lang]) {
+        return Prism.highlight(code, Prism.languages[lang], lang);
+      }
+      return code;
+    }
+  });
+
+  // Custom code block renderer - preserves copy button structure
+  marked.use({
+    renderer: {
+      code(code, lang) {
+        const displayLang = lang || 'code';
+        const highlighted = this.options.highlight ? this.options.highlight(code, lang) : escapeHtml(code);
+        return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-lang">${escapeHtml(displayLang)}</span><button class="code-copy-btn" aria-label="Copy code">Copy</button></div><pre><code class="${lang || ''}">${highlighted}</code></pre></div>`;
+      }
+    }
+  });
+
+  markdownInitialized = true;
+  return true;
+}
+
+// StreamingRenderer class for smooth character-by-character animation
+class StreamingRenderer {
+  constructor(element) {
+    this.element = element;
+    this.networkBuffer = '';
+    this.displayedChars = 0;
+    this.rafHandle = null;
+    this.timeoutHandle = null;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.charInterval = prefersReducedMotion ? 0 : 5; // ms per char (~200 chars/sec)
+  }
+
+  appendNetworkChunk(chunk) {
+    this.networkBuffer += chunk;
+    if (!this.rafHandle) {
+      this.scheduleRender();
+    }
+  }
+
+  scheduleRender() {
+    this.rafHandle = requestAnimationFrame(() => {
+      this.renderNextChar();
+    });
+  }
+
+  renderNextChar() {
+    if (this.displayedChars < this.networkBuffer.length) {
+      this.displayedChars++;
+      this.element.textContent = this.networkBuffer.slice(0, this.displayedChars);
+
+      // Schedule next character
+      this.timeoutHandle = setTimeout(() => {
+        this.scheduleRender();
+      }, this.charInterval);
+    } else {
+      // Caught up with network buffer
+      this.rafHandle = null;
+    }
+  }
+
+  finalizeMarkdown() {
+    // Skip to end and apply markdown
+    this.element.textContent = this.networkBuffer;
+    this.element.innerHTML = formatMarkdown(this.networkBuffer);
+
+    // Apply Prism highlighting to code blocks
+    if (typeof Prism !== 'undefined') {
+      this.element.querySelectorAll('pre code').forEach(block => {
+        Prism.highlightElement(block);
+      });
+    }
+  }
+
+  skipToEnd() {
+    this.destroy();
+    this.finalizeMarkdown();
+  }
+
+  destroy() {
+    if (this.rafHandle) {
+      cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = null;
+    }
+    if (this.timeoutHandle) {
+      clearTimeout(this.timeoutHandle);
+      this.timeoutHandle = null;
+    }
+  }
 }
 
 function createSessionContainer(session) {
@@ -149,6 +255,9 @@ function switchToSession(index) {
   renderTaskPanel(); // Render task panel for the new session
   saveSessionState();
   if (!newSession.isStreaming) chatInput.focus();
+
+  // Subscribe to the new session for multi-user sync
+  subscribeToSession(newSession.sessionId);
 }
 
 function closeSession(index) {
@@ -541,6 +650,7 @@ const newSessionTabBtn = $('#new-session-tab-btn');
 const abortBtn = $('#abort-btn');
 const projectNameEl = $('#project-name');
 const tokenUsageEl = $('#token-usage');
+const skillsBarEl = $('#skills-bar');
 const slashCommandsEl = $('#slash-commands');
 const fileMentionsEl = $('#file-mentions');
 const attachmentPreviewEl = $('#attachment-preview');
@@ -863,6 +973,33 @@ function requestTaskSync(sessionId) {
   }));
 }
 
+function subscribeToSession(sessionId) {
+  if (!sessionId) {
+    console.log('[Subscribe] No sessionId - skipping subscription');
+    state.currentSubscribedSessionId = null;
+    return;
+  }
+
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    console.log('[Subscribe] WebSocket not open - cannot subscribe');
+    return;
+  }
+
+  if (sessionId === state.currentSubscribedSessionId) {
+    console.log('[Subscribe] Already subscribed to', sessionId);
+    return;
+  }
+
+  // Send subscribe message to server (reuses existing 'subscribe' message type)
+  console.log('[Subscribe] Subscribing to session', sessionId);
+  state.ws.send(JSON.stringify({
+    type: 'subscribe',
+    sessionId: sessionId
+  }));
+
+  state.currentSubscribedSessionId = sessionId;
+}
+
 function connectWebSocket() {
   if (state.ws?.readyState === WebSocket.OPEN) return;
 
@@ -875,6 +1012,11 @@ function connectWebSocket() {
     if (state.sessionsRestored) {
       checkAndReconnectActiveSessions();
     }
+    // Resubscribe to current session on reconnection
+    const activeSession = getActiveSession();
+    if (activeSession && activeSession.sessionId) {
+      subscribeToSession(activeSession.sessionId);
+    }
   };
 
   state.ws.onmessage = (e) => {
@@ -885,6 +1027,8 @@ function connectWebSocket() {
   state.ws.onclose = () => {
     console.log('[WS] Disconnected');
     state.wsReconnectAttempts++;
+    // Clear subscription state on disconnect
+    state.currentSubscribedSessionId = null;
     const delay = Math.min(1000 * Math.pow(2, state.wsReconnectAttempts), 30000);
     setTimeout(connectWebSocket, delay);
   };
@@ -902,6 +1046,7 @@ function handleWsMessage(msg) {
     if (session) {
       session.sessionId = msg.sessionId;
       saveSessionState();
+      subscribeToSession(msg.sessionId);
     }
   } else if (msg.sessionId) {
     session = getSessionBySessionId(msg.sessionId);
@@ -1039,6 +1184,20 @@ function handleWsMessage(msg) {
         syncTasks(session, msg.data.tasks || []);
       }
       break;
+    case 'replay-start':
+      if (session) {
+        session.isReplaying = true;
+        // Flush any existing streaming state before replay
+        flushPendingText(session);
+      }
+      break;
+    case 'replay-end':
+      if (session) {
+        session.isReplaying = false;
+        flushPendingText(session);
+        scrollToBottom(session);
+      }
+      break;
     case 'pong':
       break;
     default:
@@ -1052,7 +1211,9 @@ function handleClaudeMessage(data, session) {
   if (!session) return;
 
   if (data.type === 'text') {
-    session.pendingText += data.content || '';
+    session.isStreaming = true;
+    session.pendingText = (session.pendingText || '') + data.content;
+
     // Store metadata for the current streaming message
     if (!session.currentMessageMetadata) {
       session.currentMessageMetadata = {
@@ -1061,7 +1222,45 @@ function handleClaudeMessage(data, session) {
         model: data.model || null
       };
     }
-    updateStreamingMessage(session);
+
+    // During replay, render instantly without animation
+    if (session.isReplaying) {
+      let el = session.containerEl.querySelector('.message.streaming');
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'message assistant streaming';
+        if (session.currentMessageMetadata) {
+          el.dataset.timestamp = session.currentMessageMetadata.timestamp || '';
+          el.dataset.messageId = session.currentMessageMetadata.messageId || '';
+          el.dataset.model = session.currentMessageMetadata.model || '';
+        }
+        session.containerEl.appendChild(el);
+      }
+      // Set text content directly without animation
+      el.textContent = session.pendingText;
+      return;
+    }
+
+    // Create renderer on first chunk (normal streaming)
+    if (!session.streamingRenderer) {
+      let el = session.containerEl.querySelector('.message.streaming');
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'message assistant streaming';
+        // Attach metadata to the element
+        if (session.currentMessageMetadata) {
+          el.dataset.timestamp = session.currentMessageMetadata.timestamp || '';
+          el.dataset.messageId = session.currentMessageMetadata.messageId || '';
+          el.dataset.model = session.currentMessageMetadata.model || '';
+        }
+        session.containerEl.appendChild(el);
+      }
+      session.streamingRenderer = new StreamingRenderer(el);
+    }
+
+    // Append network chunk to renderer
+    session.streamingRenderer.appendNetworkChunk(data.content);
+    scrollToBottom(session);
     return;
   }
 
@@ -1097,7 +1296,9 @@ function handleClaudeMessage(data, session) {
       startTime: data.startTime || null,
       summary: data.summary || null
     };
-    appendToolMessage(data.tool, data.summary, data.id, 'running', session, toolMetadata);
+    // During replay, render tools as completed since the result follows immediately
+    const status = session.isReplaying ? 'success' : 'running';
+    appendToolMessage(data.tool, data.summary, data.id, status, session, toolMetadata, data.input);
     return;
   }
 
@@ -1116,21 +1317,29 @@ function handleClaudeMessage(data, session) {
 
 function flushPendingText(session) {
   session = session || getActiveSession();
-  if (session && session.pendingText && session.containerEl) {
-    const streamingEl = session.containerEl.querySelector('.message.streaming');
+  if (!session || !session.pendingText) return;
+
+  if (session.streamingRenderer) {
+    session.streamingRenderer.skipToEnd();
+    session.streamingRenderer.destroy();
+    session.streamingRenderer = null;
+
+    // Remove streaming class after finalization
+    const streamingEl = session.containerEl?.querySelector('.message.streaming');
     if (streamingEl) {
       streamingEl.classList.remove('streaming');
-      streamingEl.innerHTML = formatMarkdown(session.pendingText);
-      // Preserve metadata on the element for history loading
-      if (session.currentMessageMetadata) {
-        streamingEl.dataset.timestamp = session.currentMessageMetadata.timestamp || '';
-        streamingEl.dataset.messageId = session.currentMessageMetadata.messageId || '';
-        streamingEl.dataset.model = session.currentMessageMetadata.model || '';
-      }
     }
-    session.pendingText = '';
-    session.currentMessageMetadata = null;
+  } else {
+    // Fallback for non-streaming
+    const streamingEl = session.containerEl?.querySelector('.message.streaming');
+    if (streamingEl) {
+      streamingEl.innerHTML = formatMarkdown(session.pendingText);
+      streamingEl.classList.remove('streaming');
+    }
   }
+
+  session.pendingText = '';
+  session.currentMessageMetadata = null;
 }
 
 function updateStreamingMessage(session) {
@@ -1158,6 +1367,14 @@ function finishStreaming(session) {
   if (!session) return;
   session.isStreaming = false;
   session.pendingPlanConfirmation = null;
+
+  // Ensure renderer is cleaned up
+  if (session.streamingRenderer) {
+    session.streamingRenderer.skipToEnd();
+    session.streamingRenderer.destroy();
+    session.streamingRenderer = null;
+  }
+
   flushPendingText(session);
 
   // Only update UI controls if this is the active session
@@ -1332,23 +1549,241 @@ function getToolIcon(tool) {
   return icons[tool] || '*';
 }
 
-function truncateToolSummary(summary, maxLen) {
-  if (!summary) return '';
-  // Handle both string and object summary formats
-  const summaryStr = typeof summary === 'object' ? summary.summary || JSON.stringify(summary) : summary;
-  if (summaryStr.length <= maxLen) return summaryStr;
-  return summaryStr.slice(0, maxLen) + '...';
+function renderToolDetails(tool, input) {
+  if (!input || Object.keys(input).length === 0) return '';
+
+  const normalizedTool = tool.toLowerCase();
+
+  switch (normalizedTool) {
+    case 'read':
+      if (input.offset !== undefined && input.limit !== undefined) {
+        return `Lines ${input.offset}-${input.offset + input.limit} of ${escapeHtml(input.file_path || 'file')}`;
+      } else if (input.file_path) {
+        return `Full file: ${escapeHtml(input.file_path)}`;
+      }
+      return '';
+
+    case 'bash':
+      if (input.command) {
+        return `<code>${escapeHtml(input.command)}</code>`;
+      }
+      return '';
+
+    case 'grep':
+      let details = '';
+      if (input.pattern) details += `Pattern: <code>${escapeHtml(input.pattern)}</code>`;
+      if (input.glob) details += ` in <code>${escapeHtml(input.glob)}</code>`;
+      if (input.type) details += ` (${escapeHtml(input.type)} files)`;
+      return details;
+
+    case 'edit':
+      if (input.old_string && input.new_string) {
+        return `${escapeHtml(input.old_string)}... → ${escapeHtml(input.new_string)}...`;
+      }
+      return '';
+
+    case 'glob':
+      if (input.pattern) {
+        const pathInfo = input.path ? ` in ${escapeHtml(input.path)}` : '';
+        return `Pattern: <code>${escapeHtml(input.pattern)}</code>${pathInfo}`;
+      }
+      return '';
+
+    case 'task':
+      if (input.description) {
+        const agentInfo = input.subagent_type ? ` (${escapeHtml(input.subagent_type)})` : '';
+        return `Delegating${agentInfo}: ${escapeHtml(input.description)}`;
+      }
+      return '';
+
+    case 'write':
+      if (input.file_path) {
+        return `File: ${escapeHtml(input.file_path)}`;
+      }
+      return '';
+
+    default:
+      return '';
+  }
 }
 
-function appendToolMessage(tool, summary, id, status, session, metadata = null) {
+function getCompactSummary(tool, input) {
+  if (!input || Object.keys(input).length === 0) return '';
+
+  const normalizedTool = tool.toLowerCase();
+
+  switch (normalizedTool) {
+    case 'bash':
+      if (input.command) {
+        const cmd = input.command.length > 60 ? input.command.slice(0, 57) + '...' : input.command;
+        return `$ ${cmd}`;
+      }
+      return '';
+
+    case 'read':
+      if (input.file_path) {
+        const parts = input.file_path.split('/');
+        return parts[parts.length - 1];
+      }
+      return '';
+
+    case 'write':
+      if (input.file_path) {
+        const parts = input.file_path.split('/');
+        return parts[parts.length - 1];
+      }
+      return '';
+
+    case 'edit':
+      if (input.file_path) {
+        const parts = input.file_path.split('/');
+        return parts[parts.length - 1];
+      }
+      return '';
+
+    case 'grep':
+      if (input.pattern) {
+        const pat = input.pattern.length > 40 ? input.pattern.slice(0, 37) + '...' : input.pattern;
+        return pat;
+      }
+      return '';
+
+    case 'glob':
+      if (input.pattern) {
+        return input.pattern;
+      }
+      return '';
+
+    case 'task':
+      if (input.description) {
+        const desc = input.description.length > 50 ? input.description.slice(0, 47) + '...' : input.description;
+        return desc;
+      }
+      return '';
+
+    default:
+      return '';
+  }
+}
+
+// Tool Clustering: Group consecutive tool pills into a collapsible cluster
+const CLUSTER_THRESHOLD = 3; // Minimum pills to form a cluster
+
+function maybeCluster(session) {
+  if (!session?.containerEl) return;
+
+  const children = Array.from(session.containerEl.children);
+
+  // Find consecutive run of unclustered tool pills at the END of the container
+  let run = [];
+  for (let i = children.length - 1; i >= 0; i--) {
+    const child = children[i];
+    if (child.classList.contains('tool-pill') && !child.closest('.tool-cluster')) {
+      run.unshift(child);
+    } else if (child.classList.contains('tool-cluster')) {
+      // Found an existing cluster at the end - stop here, we may add to it
+      break;
+    } else {
+      break; // Hit a non-tool message, stop
+    }
+  }
+
+  if (run.length < CLUSTER_THRESHOLD) return; // Not enough to cluster
+
+  // Check if there's already a cluster right before this run
+  const firstPill = run[0];
+  const prevSibling = firstPill.previousElementSibling;
+
+  if (prevSibling && prevSibling.classList.contains('tool-cluster')) {
+    // Add pills to existing cluster
+    const clusterBody = prevSibling.querySelector('.tool-cluster-body');
+    run.forEach(pill => clusterBody.appendChild(pill));
+    updateClusterHeader(prevSibling);
+  } else {
+    // Create new cluster
+    const cluster = document.createElement('div');
+    cluster.className = 'tool-cluster';
+
+    const header = document.createElement('div');
+    header.className = 'tool-cluster-header';
+    header.innerHTML = '<span class="tool-cluster-chevron">&#x25BE;</span> <span class="tool-cluster-summary"></span>';
+    header.classList.add('expanded');
+
+    const body = document.createElement('div');
+    body.className = 'tool-cluster-body';
+
+    // Insert cluster where first pill was
+    firstPill.parentNode.insertBefore(cluster, firstPill);
+    cluster.appendChild(header);
+    cluster.appendChild(body);
+
+    // Move pills into cluster body
+    run.forEach(pill => body.appendChild(pill));
+
+    updateClusterHeader(cluster);
+
+    // Click handler for cluster header
+    header.addEventListener('click', () => {
+      const isExpanded = !body.classList.contains('hidden');
+      body.classList.toggle('hidden');
+      header.classList.toggle('expanded');
+      const chevron = header.querySelector('.tool-cluster-chevron');
+      if (chevron) {
+        chevron.textContent = isExpanded ? '\u25B8' : '\u25BE';
+      }
+    });
+  }
+}
+
+function updateClusterHeader(cluster) {
+  const pills = cluster.querySelectorAll('.message.tool-pill');
+  const total = pills.length;
+
+  // Count by tool type
+  const toolCounts = {};
+  let doneCount = 0;
+  let errorCount = 0;
+
+  pills.forEach(pill => {
+    const toolName = pill.dataset.tool || 'unknown';
+    toolCounts[toolName] = (toolCounts[toolName] || 0) + 1;
+    if (pill.classList.contains('success')) doneCount++;
+    if (pill.classList.contains('error')) errorCount++;
+  });
+
+  const running = total - doneCount - errorCount;
+
+  // Build summary: "5 tool calls (3 Bash, 2 Grep)"
+  const breakdown = Object.entries(toolCounts)
+    .map(([tool, count]) => `${count} ${tool}`)
+    .join(', ');
+
+  let statusStr = '';
+  if (running > 0) {
+    statusStr = ` \u2014 ${doneCount}/${total} done`;
+  } else if (errorCount > 0) {
+    statusStr = ` \u2014 ${doneCount} done, ${errorCount} failed`;
+  } else {
+    statusStr = ` \u2014 all done`;
+  }
+
+  const summaryEl = cluster.querySelector('.tool-cluster-summary');
+  if (summaryEl) {
+    summaryEl.textContent = `${total} tool calls (${breakdown})${statusStr}`;
+  }
+}
+
+function appendToolMessage(tool, summary, id, status, session, metadata = null, input = null) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
   removeWelcome(session);
+
   const div = document.createElement('div');
   div.className = `message tool-pill ${status}`;
   div.dataset.toolId = id || '';
+  div.dataset.tool = tool.toLowerCase();  // For CSS color selectors
 
-  // Store metadata on the element for history loading
+  // Store metadata
   if (metadata) {
     div.dataset.timestamp = metadata.timestamp || '';
     div.dataset.messageId = metadata.messageId || '';
@@ -1356,64 +1791,34 @@ function appendToolMessage(tool, summary, id, status, session, metadata = null) 
     div.dataset.startTime = metadata.startTime || '';
   }
 
-  // Store full summary object (contains fullCommand, filePath, pattern, etc.)
-  const summaryObj = typeof summary === 'object' ? summary : null;
-  if (summaryObj) {
-    div.dataset.summaryData = JSON.stringify(summaryObj);
-  }
+  const serverSummary = typeof summary === 'object' ? (summary.summary || JSON.stringify(summary)) : summary;
+  const compactSummary = getCompactSummary(tool, input || {}) || serverSummary;
+  const detailsHtml = renderToolDetails(tool, input || {});
 
-  // Build expanded details section HTML
-  let detailsHtml = '';
-  if (summaryObj) {
-    detailsHtml = '<div class="tool-details">';
-    if (metadata?.startTime) {
-      detailsHtml += `<div class="tool-start-time">Started: ${escapeHtml(formatTimestamp(metadata.startTime))}</div>`;
-    }
-    if (summaryObj.fullCommand) {
-      detailsHtml += `<div class="tool-command"><strong>Command:</strong> <code>${escapeHtml(summaryObj.fullCommand)}</code></div>`;
-    }
-    if (summaryObj.filePath) {
-      detailsHtml += `<div class="tool-file-path"><strong>File:</strong> <code>${escapeHtml(summaryObj.filePath)}</code></div>`;
-    }
-    if (summaryObj.pattern && summaryObj.fullQuery) {
-      detailsHtml += `<div class="tool-pattern"><strong>Pattern:</strong> <code>${escapeHtml(summaryObj.pattern)}</code></div>`;
-      detailsHtml += `<div class="tool-full-query"><strong>Query:</strong> <code>${escapeHtml(summaryObj.fullQuery)}</code></div>`;
-    } else if (summaryObj.pattern) {
-      detailsHtml += `<div class="tool-pattern"><strong>Pattern:</strong> <code>${escapeHtml(summaryObj.pattern)}</code></div>`;
-    }
-    if (summaryObj.taskDescription) {
-      detailsHtml += `<div class="tool-task-description"><strong>Task:</strong> <span>${escapeHtml(summaryObj.taskDescription)}</span></div>`;
-    }
-    if (summaryObj.todos && summaryObj.todos.length > 0) {
-      detailsHtml += '<div class="tool-todos"><strong>Todos:</strong><ul class="todo-list">';
-      for (const todo of summaryObj.todos) {
-        const status = todo.status || 'pending';
-        const isCompleted = status === 'completed' || status === 'done';
-        const statusClass = isCompleted ? 'completed' : 'pending';
-        const content = todo.content || todo.text || todo.description || '';
-        detailsHtml += `<li class="todo-item ${statusClass}"><span class="todo-status"></span><span class="todo-content">${escapeHtml(content)}</span></li>`;
-      }
-      detailsHtml += '</ul></div>';
-    }
-    detailsHtml += '</div>';
-  }
+  const statusText = status === 'running' ? '⋯' : status === 'success' ? '✓' : '✗';
+  const durationHtml = status === 'running' ? '<span class="tool-pill-duration">0.0s</span>' : '';
 
-  // Build header HTML
-  const summaryStr = truncateToolSummary(summary, 50);
-  let headerHtml = `
-    <div class="tool-pill-header">
-      <span class="tool-pill-icon">${getToolIcon(tool)}</span>
-      <span class="tool-pill-name">${escapeHtml(tool)}</span>
-      <span class="tool-pill-summary">${escapeHtml(summaryStr)}</span>
-      <span class="tool-pill-duration" data-tool-id="${escapeAttr(id || '')}"></span>
-      <span class="tool-pill-status ${status}">${status === 'running' ? '...' : status === 'success' ? 'done' : 'fail'}</span>
-      ${summaryObj ? '<span class="tool-pill-toggle" title="Toggle details">⌃</span>' : ''}
+  div.innerHTML = `
+    <div class="tool-pill-header expanded" data-tool-id="${escapeHtml(id || '')}">
+      <div class="tool-pill-top">
+        <div style="display: flex; align-items: center; gap: 4px;">
+          <span class="tool-pill-icon">${getToolIcon(tool)}</span>
+          <span class="tool-pill-name">${escapeHtml(tool)}</span>
+          <span class="tool-pill-summary">${escapeHtml(compactSummary)}</span>
+          <span class="tool-pill-chevron">▾</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 4px;">
+          <span class="tool-pill-status ${status}">${statusText}</span>
+          ${durationHtml}
+        </div>
+      </div>
     </div>
+    <div class="tool-pill-output">${detailsHtml ? `<div class="tool-pill-output-command">${detailsHtml}</div>` : ''}</div>
   `;
 
-  div.innerHTML = headerHtml + detailsHtml + '<div class="tool-pill-output"></div>';
   session.containerEl.appendChild(div);
   scrollToBottom(session);
+  maybeCluster(session);
 }
 
 function updateToolResult(id, success, output, session, resultMetadata = null) {
@@ -1436,7 +1841,7 @@ function updateToolResult(id, success, output, session, resultMetadata = null) {
 
     const statusEl = target.querySelector('.tool-pill-status');
     if (statusEl) {
-      statusEl.textContent = success ? 'done' : 'fail';
+      statusEl.textContent = success ? '✓' : '✗';
       statusEl.className = `tool-pill-status ${success ? 'success' : 'error'}`;
     }
 
@@ -1457,8 +1862,27 @@ function updateToolResult(id, success, output, session, resultMetadata = null) {
     if (output && output.trim()) {
       const outputEl = target.querySelector('.tool-pill-output');
       if (outputEl) {
-        outputEl.textContent = output;
+        // If there's an existing command detail div, keep it and append output after
+        const existingCommand = outputEl.querySelector('.tool-pill-output-command');
+        if (existingCommand) {
+          const outputText = document.createElement('pre');
+          outputText.textContent = output;
+          outputEl.appendChild(outputText);
+        } else {
+          outputEl.textContent = output;
+        }
+
+        // Always show output expanded
+        outputEl.classList.remove('hidden');
+        const header = target.querySelector('.tool-pill-header');
+        if (header) header.classList.add('expanded');
       }
+    }
+
+    // Update cluster header if this pill is inside a cluster
+    const parentCluster = target.closest('.tool-cluster');
+    if (parentCluster) {
+      updateClusterHeader(parentCluster);
     }
   }
   scrollToBottom(session);
@@ -1826,6 +2250,15 @@ function sendMessage(content) {
     }));
   }
 
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    appendSystemMessage('Connection lost. Reconnecting...', session);
+    session.isStreaming = false;
+    chatInput.disabled = false;
+    sendBtn.disabled = false;
+    modeBtn.disabled = false;
+    attachBtn.disabled = false;
+    return;
+  }
   state.ws.send(JSON.stringify(message));
 
   // Show user message with attachments displayed as images
@@ -1943,33 +2376,23 @@ document.addEventListener('click', (e) => {
 
 // Tool pill expand/collapse delegation
 sessionContainersEl.addEventListener('click', (e) => {
-  const pillHeader = e.target.closest('.tool-pill-header');
-  if (pillHeader) {
-    const pill = pillHeader.closest('.message.tool-pill');
-    const output = pill?.querySelector('.tool-pill-output');
-    const details = pill?.querySelector('.tool-details');
-    const toggle = pill?.querySelector('.tool-pill-toggle');
+  const header = e.target.closest('.tool-pill-header');
+  if (!header) return;
 
-    // Toggle output section if it has content
-    let hasOutput = output && output.textContent.trim();
-    let hasDetails = details && !details.classList.contains('hidden') || details?.querySelector('*');
+  const pill = header.closest('.message.tool-pill');
+  if (!pill) return;
 
-    if (hasOutput || hasDetails) {
-      const isExpanded = !output?.classList.contains('hidden') || !details?.classList.contains('hidden');
+  const output = pill.querySelector('.tool-pill-output');
+  if (!output) return;
 
-      // Toggle both output and details
-      if (output) {
-        output.classList.toggle('hidden', isExpanded);
-      }
-      if (details) {
-        details.classList.toggle('hidden', isExpanded);
-      }
-
-      // Update toggle icon
-      if (toggle) {
-        toggle.textContent = isExpanded ? '⌄' : '⌃';
-      }
-    }
+  // Toggle expanded state
+  const isExpanded = !output.classList.contains('hidden');
+  if (isExpanded) {
+    output.classList.add('hidden');
+    header.classList.remove('expanded');
+  } else {
+    output.classList.remove('hidden');
+    header.classList.add('expanded');
   }
 });
 
@@ -2046,6 +2469,14 @@ function renderSlashCommands(commands) {
     `;
   }).join('');
 }
+
+// Skills bar - quick-access slash command buttons
+skillsBarEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('.skill-btn');
+  if (btn) {
+    insertSlashCommand(btn.dataset.command);
+  }
+});
 
 // Event delegation for slash commands (avoids memory leaks)
 slashCommandsEl.addEventListener('click', (e) => {
@@ -2407,6 +2838,13 @@ sidebarOverlay.addEventListener('click', closeSidebar);
 
 // Task panel toggle button
 document.addEventListener('DOMContentLoaded', () => {
+  // Initialize markdown renderer
+  if (initializeMarkdownRenderer()) {
+    console.log('[Markdown] Initialized Marked.js + DOMPurify + Prism.js');
+  } else {
+    console.log('[Markdown] Using fallback regex renderer');
+  }
+
   const taskPanelToggle = document.getElementById('task-panel-toggle');
   if (taskPanelToggle) {
     taskPanelToggle.addEventListener('click', toggleTaskPanel);
@@ -2695,7 +3133,7 @@ async function loadSessionHistory(session) {
 
           // Use enhanced summary from API if available, otherwise fall back to legacy
           const summary = msg.summary || getToolSummaryFromInput(msg.tool, msg.input);
-          appendToolMessage(msg.tool, summary, null, 'success', session, toolMetadata);
+          appendToolMessage(msg.tool, summary, null, 'success', session, toolMetadata, msg.input);
         }
       }
       // Scroll to bottom to show most recent messages
@@ -2720,6 +3158,9 @@ async function loadSessionHistory(session) {
   }
 
   session.needsHistoryLoad = false;
+
+  // Subscribe to session for multi-user sync
+  subscribeToSession(session.sessionId);
 }
 
 async function resumeSession(sessionId, skipHashUpdate = false) {
@@ -2731,6 +3172,9 @@ async function resumeSession(sessionId, skipHashUpdate = false) {
   closeSidebar();
 
   await loadSessionHistory(session);
+
+  // Subscribe to session for multi-user sync
+  subscribeToSession(sessionId);
 
   enableChat();
   saveSessionState();
@@ -2914,17 +3358,32 @@ function linkifyFilePaths(text) {
 function formatMarkdown(text) {
   if (!text) return '';
 
+  // Use Marked.js if available, fallback to regex
+  if (markdownInitialized && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+    try {
+      const html = marked.parse(text);
+      return DOMPurify.sanitize(html, {
+        ALLOWED_TAGS: ['h1','h2','h3','h4','h5','h6','p','br','strong','em','code','pre','a','ul','ol','li','blockquote','table','thead','tbody','tr','th','td','hr','del','div','span','button'],
+        ALLOWED_ATTR: ['href','class','aria-label','target','rel'],
+        FORBID_TAGS: ['script','iframe','object','embed','style'],
+        FORBID_ATTR: ['onclick','onerror','onload','onmouseover']
+      });
+    } catch (e) {
+      console.error('[Markdown] Parse error, falling back to regex:', e);
+      // Fall through to regex fallback
+    }
+  }
+
+  // Fallback regex renderer (original implementation)
   let html = escapeHtml(text);
 
-  // First, protect code blocks from linkification
   const codeBlocks = [];
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
     const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
-    codeBlocks.push({ lang, code, full: _ });
+    codeBlocks.push({ lang, code });
     return placeholder;
   });
 
-  // Also protect inline code
   const inlineCodes = [];
   html = html.replace(/`([^`]+)`/g, (_, code) => {
     const placeholder = `__INLINE_CODE_${inlineCodes.length}__`;
@@ -2932,20 +3391,16 @@ function formatMarkdown(text) {
     return placeholder;
   });
 
-  // Linkify file paths (now that code blocks are protected)
   html = linkifyFilePaths(html);
 
-  // Restore inline code
   html = html.replace(/__INLINE_CODE_(\d+)__/g, (_, idx) => {
     return `<code>${inlineCodes[idx]}</code>`;
   });
 
-  // Apply other markdown formatting
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   html = html.replace(/\n/g, '<br>');
 
-  // Restore code blocks
   html = html.replace(/__CODE_BLOCK_(\d+)__/g, (_, idx) => {
     const block = codeBlocks[idx];
     const displayLang = block.lang || 'code';

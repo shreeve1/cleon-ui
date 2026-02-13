@@ -103,7 +103,7 @@ describe('server/index.js - code structure', () => {
     });
 
     it('should have a single import line with all required functions', () => {
-      expect(indexJs).toMatch(/import\s*\{[^}]*handleChat[^}]*handleAbort[^}]*handleQuestionResponse[^}]*isSessionActive[^}]*resubscribeSession[^}]*\}\s*from\s*'\.\/claude\.js'/);
+      expect(indexJs).toMatch(/import\s*\{[^}]*handleChat[^}]*handleAbort[^}]*handleQuestionResponse[^}]*handlePlanResponse[^}]*isSessionActive[^}]*resubscribeSession[^}]*\}\s*from\s*'\.\/claude\.js'/);
     });
   });
 

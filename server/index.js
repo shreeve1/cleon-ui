@@ -13,10 +13,11 @@ import rateLimit from 'express-rate-limit';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
-import { handleChat, handleAbort, handleQuestionResponse, isSessionActive, resubscribeSession } from './claude.js';
+import { handleChat, handleAbort, handleQuestionResponse, handlePlanResponse, isSessionActive, resubscribeSession } from './claude.js';
 import { getAllCommands } from './commands.js';
 import { processUpload, validateFile } from './uploads.js';
 import logger from './logger.js';
+import { subscribeToSession, unsubscribeFromSession, replayBufferToClient } from './broadcast.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -222,6 +223,21 @@ wss.on('connection', (ws, req) => {
           }));
           break;
 
+        case 'plan-response': {
+          const planSuccess = await handlePlanResponse(
+            msg.sessionId,
+            msg.toolUseId,
+            msg.approved,
+            msg.feedback
+          );
+          ws.send(JSON.stringify({
+            type: 'plan-response-result',
+            sessionId: msg.sessionId,
+            success: planSuccess
+          }));
+          break;
+        }
+
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
@@ -235,12 +251,30 @@ wss.on('connection', (ws, req) => {
           break;
 
         case 'subscribe':
-          const subscribed = resubscribeSession(msg.sessionId, ws);
-          ws.send(JSON.stringify({
-            type: 'subscribe-result',
-            sessionId: msg.sessionId,
-            success: subscribed
-          }));
+          const isActive = isSessionActive(msg.sessionId);
+
+          if (isActive) {
+            // Subscribe this WebSocket to the session (supports multi-user)
+            subscribeToSession(msg.sessionId, ws);
+
+            // Also update sessionInfo.ws for reconnection compatibility
+            resubscribeSession(msg.sessionId, ws);
+
+            ws.send(JSON.stringify({
+              type: 'subscribe-result',
+              sessionId: msg.sessionId,
+              success: true
+            }));
+            // Replay buffered messages to catch up late-joining client
+            replayBufferToClient(msg.sessionId, ws);
+          } else {
+            ws.send(JSON.stringify({
+              type: 'subscribe-result',
+              sessionId: msg.sessionId,
+              success: false,
+              error: 'Session not active'
+            }));
+          }
           break;
 
         default:
@@ -259,6 +293,13 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     logger.info('WebSocket disconnected', { username: user.username });
+
+    // Clean up all subscriptions for this WebSocket
+    if (ws.subscribedSessions) {
+      for (const sessionId of ws.subscribedSessions) {
+        unsubscribeFromSession(sessionId, ws);
+      }
+    }
   });
 
   ws.on('error', (err) => {
