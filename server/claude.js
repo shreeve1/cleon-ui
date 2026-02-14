@@ -23,6 +23,123 @@ const MODEL_CONTEXT_WINDOWS = {
   'default': 200000
 };
 
+function formatConversationHistory(messages, maxChars = 100000) {
+  if (!messages || messages.length === 0) return '';
+
+  const lines = [];
+  let totalChars = 0;
+
+  const recentMessages = messages.slice(-50);
+
+  for (const msg of recentMessages) {
+    let line = '';
+    const timestamp = msg.timestamp ? `[${new Date(msg.timestamp).toLocaleTimeString()}] ` : '';
+
+    if (msg.role === 'user') {
+      line = `${timestamp}USER: ${msg.content || ''}`;
+    } else if (msg.role === 'assistant') {
+      const content = msg.content || '';
+      const truncated = content.length > 2000
+        ? content.slice(0, 2000) + '...[truncated]'
+        : content;
+      line = `${timestamp}ASSISTANT: ${truncated}`;
+    } else if (msg.role === 'tool') {
+      line = `${timestamp}TOOL (${msg.tool}): ${msg.summary || 'executed'}`;
+    }
+
+    if (line) {
+      totalChars += line.length;
+      if (totalChars > maxChars) break;
+      lines.push(line);
+    }
+  }
+
+  if (lines.length === 0) return '';
+
+  return `<conversation-history>
+Previous conversation context (${lines.length} messages):
+
+${lines.join('\n\n')}
+
+</conversation-history>
+
+`;
+}
+
+async function loadSessionHistory(projectPath, sessionId, limit = 50) {
+  const CLAUDE_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+
+  const projectName = '-' + projectPath.slice(1).replace(/\//g, '-');
+  const projectDir = path.join(CLAUDE_PROJECTS, projectName);
+
+  try {
+    const files = await fs.readdir(projectDir);
+    const jsonlFiles = files.filter(f =>
+      f.endsWith('.jsonl') &&
+      !f.startsWith('agent-') &&
+      f.startsWith(sessionId)
+    );
+
+    if (jsonlFiles.length === 0) {
+      console.log(`[Claude] No session file found for ${sessionId}`);
+      return [];
+    }
+
+    const messages = [];
+    const sessionFile = path.join(projectDir, jsonlFiles[0]);
+    const content = await fs.readFile(sessionFile, 'utf8');
+    const lines = content.split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.sessionId !== sessionId) continue;
+
+        const msg = parseHistoryEntry(entry);
+        if (msg) messages.push(msg);
+      } catch { }
+    }
+
+    messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return messages.slice(-limit);
+
+  } catch (err) {
+    console.error('[Claude] Failed to load session history:', err.message);
+    return [];
+  }
+}
+
+function parseHistoryEntry(entry) {
+  const timestamp = entry.timestamp || new Date().toISOString();
+
+  if (entry.type === 'user' || entry.message?.role === 'user') {
+    let text = entry.message?.content;
+    if (Array.isArray(text)) {
+      text = text.filter(t => t.type === 'text').map(t => t.text).join('\n');
+    }
+    if (typeof text === 'string' && text.length > 0 &&
+        !text.startsWith('<command-') &&
+        !text.startsWith('{')) {
+      return { role: 'user', content: text, timestamp };
+    }
+  }
+
+  if (entry.type === 'assistant' || entry.message?.role === 'assistant') {
+    const content = entry.message?.content;
+    if (Array.isArray(content)) {
+      const textParts = content.filter(c => c.type === 'text').map(c => c.text);
+      if (textParts.length > 0) {
+        return { role: 'assistant', content: textParts.join('\n'), timestamp };
+      }
+    }
+    if (typeof content === 'string' && content.length > 0) {
+      return { role: 'assistant', content, timestamp };
+    }
+  }
+
+  return null;
+}
+
 // Track active sessions for abort capability
 const activeSessions = new Map();
 
@@ -101,6 +218,21 @@ export async function handleChat(msg, ws) {
   let prompt = content || '';
   let tempImagePaths = [];
 
+  if (sessionId && !isNewSession) {
+    try {
+      console.log(`[Claude] Loading history for session ${sessionId}`);
+      const history = await loadSessionHistory(projectPath, sessionId, 50);
+
+      if (history.length > 0) {
+        const historyBlock = formatConversationHistory(history);
+        prompt = historyBlock + 'CONTINUING CONVERSATION - User asks: ' + prompt;
+        console.log(`[Claude] Prepended ${history.length} history messages to prompt`);
+      }
+    } catch (err) {
+      console.error('[Claude] Failed to load history:', err);
+    }
+  }
+
   if (attachments && attachments.length > 0) {
     const textAttachments = [];
 
@@ -144,6 +276,10 @@ export async function handleChat(msg, ws) {
     permissionMode,
     systemPrompt: { type: 'preset', preset: 'claude_code' },
     settingSources: ['project', 'user', 'local'],
+    env: { ...process.env, DEBUG_CLAUDE_AGENT_SDK: '1' },
+    stderr: (data) => {
+      console.log(`[Claude:stderr] ${data.trimEnd()}`);
+    },
     // Custom permission callback to intercept AskUserQuestion
     canUseTool: async (toolName, input, { toolUseID, signal }) => {
       // Intercept AskUserQuestion to wait for user input

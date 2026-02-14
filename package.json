@@ -22,10 +22,12 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "pdf-parse": "^2.4.5",
+    "puppeteer": "^24.37.3",
     "winston": "^3.19.0",
     "ws": "^8.14.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "playwright": "^1.58.2",
     "vitest": "^4.0.18"
   }

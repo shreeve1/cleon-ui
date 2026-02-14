@@ -889,6 +889,7 @@ function showMain() {
   // Try to restore sessions from localStorage first
   restoreSessionState().then(restored => {
     if (!restored) {
+      console.log('[Session] localStorage restore failed, falling back to hash restoration');
       // Fall back to hash restoration
       restoreFromHash();
     }
@@ -898,19 +899,29 @@ function showMain() {
 async function restoreFromHash() {
   const route = parseHash();
   if (!route) return;
-  
+
+  console.log('[Session] Restoring from hash:', route);
+
   try {
     const { path: projectPath } = await api(`/api/projects/${encodeURIComponent(route.projectName)}/path`);
     const displayName = projectPath.split('/').pop();
-    
+
     await selectProject(route.projectName, projectPath, displayName, true);
     closeSidebar();
-    
+
     if (route.sessionId) {
       await resumeSession(route.sessionId, true);
+
+      // Defensive check: ensure sessionId survived the restore flow
+      const session = getActiveSession();
+      if (session && !session.sessionId && route.sessionId) {
+        console.warn('[Session] Hash restore: sessionId not set after resumeSession, forcing it');
+        session.sessionId = route.sessionId;
+      }
     } else {
       enableChat();
     }
+    saveSessionState();
   } catch (err) {
     console.error('Failed to restore from hash:', err);
   }
@@ -2151,10 +2162,11 @@ function removeWelcome(session) {
 function clearMessages(session) {
   session = session || getActiveSession();
   if (!session?.containerEl) return;
+  const isResuming = !!session.sessionId;
   session.containerEl.innerHTML = `
     <div class="welcome-message">
-      <h2>New Session</h2>
-      <p>Start typing to chat with Claude.</p>
+      <h2>${isResuming ? 'Continuing Session' : 'New Session'}</h2>
+      <p>${isResuming ? 'Continuing session - conversation context preserved.' : 'New session - no conversation history.'}</p>
     </div>
   `;
   session.pendingText = '';
@@ -2230,6 +2242,13 @@ function sendMessage(content) {
   }
 
   const mode = MODES[state.modeIndex];
+
+  console.log('[Session] Sending message with sessionId:', session.sessionId, 'isNewSession:', !session.sessionId);
+
+  // Context loss detection: warn if sending as new session but UI already shows messages
+  if (!session.sessionId && session.containerEl && session.containerEl.children.length > 1) {
+    console.warn('[Session] WARNING: Sending as new session but UI shows existing messages - possible context loss');
+  }
 
   const message = {
     type: 'chat',
@@ -2999,6 +3018,12 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
         sessionsContainer.querySelectorAll('.session-item').forEach(el => {
           el.addEventListener('click', () => resumeSession(el.dataset.id));
         });
+
+        // Auto-resume most recent session if available
+        if (sessions.length > 0 && !activeSession.sessionId) {
+          await resumeSession(sessions[0].id, skipHashUpdate);
+          return;
+        }
       }
     } catch (err) {
       sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
@@ -3057,6 +3082,11 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
       sessionsContainer.querySelectorAll('.session-item').forEach(el => {
         el.addEventListener('click', () => resumeSession(el.dataset.id));
       });
+
+      // Auto-resume most recent session if available
+      if (sessions.length > 0 && !session.sessionId) {
+        await resumeSession(sessions[0].id, skipHashUpdate);
+      }
     }
   } catch (err) {
     sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
@@ -3143,6 +3173,9 @@ async function loadSessionHistory(session) {
       }
     }
   } catch (err) {
+    console.warn('[Session] History load failed for', session.sessionId, '- session resume still functional:', err.message);
+    // NOTE: Do NOT clear session.sessionId here - the Claude SDK resume
+    // works independently of UI history display
     if (session.containerEl) {
       session.containerEl.innerHTML = `
         <div class="welcome-message">
@@ -3150,10 +3183,6 @@ async function loadSessionHistory(session) {
           <p>Could not load history. Continue your conversation.</p>
         </div>
       `;
-    }
-    // If session/project was deleted or doesn't exist, clear the sessionId so user starts fresh
-    if (err.message && (err.message.includes('Failed to load') || err.message.includes('404'))) {
-      session.sessionId = null;
     }
   }
 
@@ -3168,6 +3197,7 @@ async function resumeSession(sessionId, skipHashUpdate = false) {
   if (!session) return;
 
   session.sessionId = sessionId;
+  saveSessionState(); // Persist immediately before history load - ensures sessionId survives even if loadSessionHistory fails
   if (!skipHashUpdate) updateHash(session.project.name, sessionId);
   closeSidebar();
 

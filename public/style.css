@@ -1967,8 +1967,10 @@ body::after {
 @media (max-width: 767px) {
   .session-tab {
     min-width: 32px;
-    max-width: 120px;
+    max-width: 150px;
     padding: 4px 8px;
+    display: flex;
+    align-items: center;
   }
 
   .session-tab .session-tab-number {
@@ -1979,11 +1981,28 @@ body::after {
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 100px;  /* Fit within tab max-width */
+    max-width: 90px;  /* Fit within tab max-width */
   }
 
   .session-tab .close-tab {
-    display: none !important;
+    display: none;
+  }
+
+  .session-tab.show-close .close-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    min-height: 28px;
+    font-size: 16px;
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .session-tab.show-close .close-tab:active {
+    background: rgba(255, 0, 60, 0.15);
   }
 
   #skills-bar {
