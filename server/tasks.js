@@ -3,6 +3,9 @@
  * Manages in-memory task state per session with websocket broadcasts
  */
 
+import { publish } from './bus.js';
+import { broadcastToSession } from './broadcast.js';
+
 // Track tasks per session: sessionId -> Map(taskId -> task)
 const sessionTasks = new Map();
 let taskIdCounter = 1;
@@ -100,21 +103,45 @@ export function clearSession(sessionId) {
 }
 
 /**
- * Broadcast task update to WebSocket client
- * @param {WebSocket} ws - WebSocket connection
+ * Broadcast task update to WebSocket client and SSE subscribers
+ * @param {WebSocket} ws - WebSocket connection (can be null)
  * @param {string} type - Update type ('task-started', 'task-completed', 'task-failed')
  * @param {object} task - Task data
+ * @param {string} [username] - Username for SSE publishing
+ * @param {string} [sessionId] - Session ID for message buffering
  */
-export function broadcastTaskUpdate(ws, type, task) {
-  if (!ws || ws.readyState !== 1) return; // WebSocket.OPEN = 1
+export function broadcastTaskUpdate(ws, type, task, username = null, sessionId = null) {
+  const message = {
+    type,
+    data: task,  // Frontend expects 'data' wrapper
+    sessionId
+  };
 
-  try {
-    ws.send(JSON.stringify({
-      type,
-      task
-    }));
-  } catch (err) {
-    console.error(`[Tasks] Error broadcasting task update:`, err.message);
+  // Send via SSE event bus (primary path)
+  if (username) {
+    try {
+      publish(username, message);
+    } catch (err) {
+      console.error(`[Tasks] Error publishing task update to SSE:`, err.message);
+    }
+  }
+
+  // Buffer for session replay (late-joining clients)
+  if (sessionId) {
+    try {
+      broadcastToSession(sessionId, message);
+    } catch (err) {
+      console.error(`[Tasks] Error buffering task update:`, err.message);
+    }
+  }
+
+  // Fallback: WebSocket (for legacy clients)
+  if (ws && ws.readyState === 1) { // WebSocket.OPEN
+    try {
+      ws.send(JSON.stringify(message));
+    } catch (err) {
+      console.error(`[Tasks] Error sending task update via WebSocket:`, err.message);
+    }
   }
 }
 

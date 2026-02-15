@@ -190,9 +190,9 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
       }
     }
 
-    // Transform and forward message (pass current model, sessionId, and ws for task tracking)
+    // Transform and forward message (pass current model, sessionId, ws, and username for task tracking)
     const currentModel = message.session_id ? sessionModels.get(message.session_id) : null;
-    const transformed = transformMessage(message, currentModel, message.session_id, sessionInfo.ws);
+    const transformed = transformMessage(message, currentModel, message.session_id, sessionInfo.ws, sessionInfo.username);
     if (transformed) {
       sendMessage(sessionInfo.ws, {
         type: 'claude-message',
@@ -276,6 +276,7 @@ export async function handleChat(msg, ws, username) {
 
   const options = {
     cwd: projectPath,
+    model: msg.model || undefined,
     permissionMode,
     systemPrompt: { type: 'preset', preset: 'claude_code' },
     settingSources: ['project', 'user', 'local'],
@@ -620,7 +621,7 @@ function generateTimestamp() {
  * Includes model information when available
  * Creates/completes tasks for tool execution
  */
-function transformMessage(msg, model = null, sessionId = null, ws = null) {
+function transformMessage(msg, model = null, sessionId = null, ws = null, username = null) {
   if (!msg || !msg.type) return null;
 
   // Common metadata for all messages
@@ -693,7 +694,7 @@ function transformMessage(msg, model = null, sessionId = null, ws = null) {
           toolUseToTaskMap.set(toolUse.id, task.taskId);
 
           // Broadcast task started
-          broadcastTaskUpdate(ws, 'task-started', task);
+          broadcastTaskUpdate(ws, 'task-started', task, username, sessionId);
 
           // Clean up old mappings (keep last 100)
           if (toolUseToTaskMap.size > 100) {
@@ -771,7 +772,7 @@ function transformMessage(msg, model = null, sessionId = null, ws = null) {
             if (toolResult.is_error) {
               task = taskManager.trackTaskFailed(sessionId, taskId, toolResult.content);
               if (task) {
-                broadcastTaskUpdate(ws, 'task-failed', task);
+                broadcastTaskUpdate(ws, 'task-failed', task, username, sessionId);
               }
             } else {
               task = taskManager.trackTaskComplete(sessionId, taskId, {
@@ -780,7 +781,7 @@ function transformMessage(msg, model = null, sessionId = null, ws = null) {
                   : JSON.stringify(toolResult.content)
               });
               if (task) {
-                broadcastTaskUpdate(ws, 'task-completed', task);
+                broadcastTaskUpdate(ws, 'task-completed', task, username, sessionId);
               }
             }
             // Clean up mapping

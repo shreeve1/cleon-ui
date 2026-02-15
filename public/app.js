@@ -21,6 +21,7 @@ const state = {
   searchTimeout: null,
   customCommands: [],
   forceNewTab: false,
+  selectedModel: localStorage.getItem('selectedModel') || 'sonnet',
 };
 
 // Session object factory
@@ -228,6 +229,11 @@ function switchToSession(index) {
   // Lazy-load message history for restored sessions
   if (newSession.needsHistoryLoad) {
     loadSessionHistory(newSession);
+  } else if (!newSession.sessionId) {
+    // New session without history - ensure it has welcome message
+    if (!newSession.containerEl.querySelector('.welcome-message')) {
+      clearMessages(newSession);
+    }
   }
 
   if (newSession.isStreaming) {
@@ -235,12 +241,14 @@ function switchToSession(index) {
     chatInput.disabled = true;
     sendBtn.disabled = true;
     modeBtn.disabled = true;
+    modelBtn.disabled = true;
     attachBtn.disabled = true;
   } else {
     abortBtn.classList.add('hidden');
     chatInput.disabled = false;
     sendBtn.disabled = false;
     modeBtn.disabled = false;
+    modelBtn.disabled = false;
     attachBtn.disabled = false;
   }
 
@@ -655,6 +663,8 @@ const contextUsageFill = $('#context-usage-fill');
 const contextUsageText = $('#context-usage-text');
 const scrollToBottomBtn = $('#scroll-to-bottom-btn');
 const unreadBadge = $('#unread-badge');
+const modelBtn = $('#model-btn');
+const modelDropdown = $('#model-dropdown');
 
 // Built-in commands (always available)
 const BUILTIN_COMMANDS = [
@@ -694,6 +704,32 @@ function parseCommand(message) {
   const args = parts.slice(1).join(' ');
   return { command, args };
 }
+
+// Model selection
+function setModel(model) {
+  state.selectedModel = model;
+  localStorage.setItem('selectedModel', model);
+  modelBtn.title = model.charAt(0).toUpperCase() + model.slice(1);
+  modelDropdown.querySelectorAll('.dropdown-item').forEach(item => {
+    item.classList.toggle('active', item.dataset.model === model);
+  });
+  modelDropdown.classList.add('hidden');
+}
+
+modelBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  modelDropdown.classList.toggle('hidden');
+});
+
+modelDropdown.querySelectorAll('.dropdown-item').forEach(item => {
+  item.addEventListener('click', () => {
+    setModel(item.dataset.model);
+  });
+});
+
+document.addEventListener('click', () => {
+  modelDropdown.classList.add('hidden');
+});
 
 // Execute a built-in command locally
 function executeBuiltinCommand(command, args) {
@@ -1028,12 +1064,14 @@ function handleServerEvent(event) {
         chatInput.disabled = true;
         sendBtn.disabled = true;
         modeBtn.disabled = true;
+        modelBtn.disabled = true;
         attachBtn.disabled = true;
       } else {
         abortBtn.classList.add('hidden');
         chatInput.disabled = false;
         sendBtn.disabled = false;
         modeBtn.disabled = false;
+        modelBtn.disabled = false;
         attachBtn.disabled = false;
       }
     }
@@ -1050,12 +1088,14 @@ function handleServerEvent(event) {
           chatInput.disabled = true;
           sendBtn.disabled = true;
           modeBtn.disabled = true;
+          modelBtn.disabled = true;
           attachBtn.disabled = true;
         } else {
           abortBtn.classList.add('hidden');
           chatInput.disabled = false;
           sendBtn.disabled = false;
           modeBtn.disabled = false;
+          modelBtn.disabled = false;
           attachBtn.disabled = false;
         }
       }
@@ -1374,6 +1414,7 @@ function finishStreaming(session) {
     chatInput.disabled = false;
     sendBtn.disabled = false;
     modeBtn.disabled = false;
+    modelBtn.disabled = false;
     attachBtn.disabled = false;
   }
 
@@ -2234,6 +2275,7 @@ function sendMessage(content) {
     type: 'chat',
     content: content,
     mode: mode.name,
+    model: state.selectedModel,
     projectPath: session.project.path,
     sessionId: session.sessionId,
     isNewSession: !session.sessionId
@@ -2255,6 +2297,7 @@ function sendMessage(content) {
     chatInput.disabled = false;
     sendBtn.disabled = false;
     modeBtn.disabled = false;
+    modelBtn.disabled = false;
     attachBtn.disabled = false;
     return;
   }
@@ -2276,6 +2319,7 @@ function sendMessage(content) {
   chatInput.disabled = true;
   sendBtn.disabled = true;
   modeBtn.disabled = true;
+  modelBtn.disabled = true;
   attachBtn.disabled = true;
 }
 
@@ -2426,6 +2470,26 @@ if (window.visualViewport) {
   });
 }
 
+function calculateCommandScore(cmd, query) {
+  const nameLower = cmd.name.toLowerCase();
+
+  // Highest priority: exact name match
+  if (nameLower === query) return 1000;
+
+  // High priority: name starts with query (prefix match)
+  if (nameLower.startsWith(query)) return 500 + (query.length * 10);
+
+  // Medium priority: query is a word in the name (for multi-word commands)
+  const words = nameLower.split(/[\s_-]/);
+  if (words.some(word => word === query)) return 300 + (query.length * 10);
+
+  // Lower priority: name contains the query anywhere (substring match)
+  if (nameLower.includes(query)) return 100 + (query.length * 10);
+
+  // No match
+  return 0;
+}
+
 function handleSlashCommandInput() {
   const value = chatInput.value;
 
@@ -2436,17 +2500,20 @@ function handleSlashCommandInput() {
 
   const query = value.slice(1).toLowerCase();
   const allCommands = getAllCommands();
-  const filtered = allCommands.filter(cmd =>
-    cmd.name.toLowerCase().includes(query) ||
-    cmd.desc.toLowerCase().includes(query)
-  );
 
-  if (filtered.length === 0) {
+  // Score and filter commands by name only
+  const scoredCommands = allCommands
+    .map(cmd => ({ cmd, score: calculateCommandScore(cmd, query) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)  // Sort descending by score
+    .map(item => item.cmd);  // Extract commands
+
+  if (scoredCommands.length === 0) {
     hideSlashCommands();
     return;
   }
 
-  renderSlashCommands(filtered);
+  renderSlashCommands(scoredCommands);
   showSlashCommands();
 }
 
@@ -2555,8 +2622,12 @@ function updateSlashCommandSelection(items) {
 }
 
 function insertSlashCommand(command) {
+  // Replace existing text with the command
   chatInput.value = command + ' ';
+
   chatInput.focus();
+  // Move cursor to end of input
+  chatInput.selectionStart = chatInput.selectionEnd = chatInput.value.length;
   hideSlashCommands();
   chatInput.dispatchEvent(new Event('input'));
 }
@@ -2848,6 +2919,11 @@ document.addEventListener('DOMContentLoaded', () => {
   if (taskPanelToggle) {
     taskPanelToggle.addEventListener('click', toggleTaskPanel);
   }
+
+  // Initialize model selection
+  if (modelBtn && modelDropdown) {
+    setModel(state.selectedModel);
+  }
 });
 
 projectSearch.addEventListener('input', () => {
@@ -2998,12 +3074,6 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
         sessionsContainer.querySelectorAll('.session-item').forEach(el => {
           el.addEventListener('click', () => resumeSession(el.dataset.id));
         });
-
-        // Auto-resume most recent session if available
-        if (sessions.length > 0 && !activeSession.sessionId) {
-          await resumeSession(sessions[0].id, skipHashUpdate);
-          return;
-        }
       }
     } catch (err) {
       sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
@@ -3062,11 +3132,6 @@ async function selectProject(name, path, displayName, skipHashUpdate = false) {
       sessionsContainer.querySelectorAll('.session-item').forEach(el => {
         el.addEventListener('click', () => resumeSession(el.dataset.id));
       });
-
-      // Auto-resume most recent session if available
-      if (sessions.length > 0 && !session.sessionId) {
-        await resumeSession(sessions[0].id, skipHashUpdate);
-      }
     }
   } catch (err) {
     sessionsContainer.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
@@ -3220,6 +3285,7 @@ function enableChat() {
   chatInput.disabled = false;
   sendBtn.disabled = false;
   modeBtn.disabled = false;
+  modelBtn.disabled = false;
   attachBtn.disabled = false;
   chatInput.focus();
 }
