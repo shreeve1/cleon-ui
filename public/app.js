@@ -12,17 +12,15 @@ const state = {
   ws: null,
   wsReconnectAttempts: 0,
   notificationsEnabled: false,
-  // Multi-session state
-  sessions: [],              // Array of session objects
-  activeSessionIndex: -1,    // Index into sessions array, -1 = none
-  // UI state (shared across sessions)
+  eventSource: null,
+  sseConnected: false,
+  sessions: [],
+  activeSessionIndex: -1,
   modeIndex: 2,
   currentMode: 'bypass',
   searchTimeout: null,
   customCommands: [],
-  sessionsRestored: false,
   forceNewTab: false,
-  currentSubscribedSessionId: null  // Track which session we're subscribed to for multi-user sync
 };
 
 // Session object factory
@@ -255,9 +253,6 @@ function switchToSession(index) {
   renderTaskPanel(); // Render task panel for the new session
   saveSessionState();
   if (!newSession.isStreaming) chatInput.focus();
-
-  // Subscribe to the new session for multi-user sync
-  subscribeToSession(newSession.sessionId);
 }
 
 function closeSession(index) {
@@ -548,9 +543,6 @@ async function restoreSessionState() {
         if (hash) window.history.replaceState(null, '', '#' + hash);
       }
     }
-
-    state.sessionsRestored = true;
-    checkAndReconnectActiveSessions();
 
     return state.sessions.length > 0;
   } catch (e) {
@@ -875,8 +867,7 @@ function showAuth() {
 function showMain() {
   authScreen.classList.add('hidden');
   mainScreen.classList.remove('hidden');
-  connectWebSocket();
-  // Request notification permission
+
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission().then(perm => {
       state.notificationsEnabled = perm === 'granted';
@@ -884,15 +875,14 @@ function showMain() {
   } else if ('Notification' in window) {
     state.notificationsEnabled = Notification.permission === 'granted';
   }
-  loadCustomCommands(); // Load global commands initially
+  loadCustomCommands();
 
-  // Try to restore sessions from localStorage first
   restoreSessionState().then(restored => {
     if (!restored) {
-      console.log('[Session] localStorage restore failed, falling back to hash restoration');
-      // Fall back to hash restoration
       restoreFromHash();
     }
+    connectWebSocket();
+    connectEventStream();
   });
 }
 
@@ -962,54 +952,7 @@ function showAuthError(msg) {
   authError.classList.remove('hidden');
 }
 
-function checkAndReconnectActiveSessions() {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  for (const session of state.sessions) {
-    if (session.sessionId) {
-      state.ws.send(JSON.stringify({
-        type: 'check-active',
-        sessionId: session.sessionId
-      }));
-      // Request task sync for each active session
-      requestTaskSync(session.sessionId);
-    }
-  }
-}
 
-function requestTaskSync(sessionId) {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  state.ws.send(JSON.stringify({
-    type: 'tasks-sync-request',
-    sessionId: sessionId
-  }));
-}
-
-function subscribeToSession(sessionId) {
-  if (!sessionId) {
-    console.log('[Subscribe] No sessionId - skipping subscription');
-    state.currentSubscribedSessionId = null;
-    return;
-  }
-
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-    console.log('[Subscribe] WebSocket not open - cannot subscribe');
-    return;
-  }
-
-  if (sessionId === state.currentSubscribedSessionId) {
-    console.log('[Subscribe] Already subscribed to', sessionId);
-    return;
-  }
-
-  // Send subscribe message to server (reuses existing 'subscribe' message type)
-  console.log('[Subscribe] Subscribing to session', sessionId);
-  state.ws.send(JSON.stringify({
-    type: 'subscribe',
-    sessionId: sessionId
-  }));
-
-  state.currentSubscribedSessionId = sessionId;
-}
 
 function connectWebSocket() {
   if (state.ws?.readyState === WebSocket.OPEN) return;
@@ -1018,28 +961,13 @@ function connectWebSocket() {
   state.ws = new WebSocket(`${protocol}//${location.host}?token=${state.token}`);
 
   state.ws.onopen = () => {
-    console.log('[WS] Connected');
+    console.log('[WS] Connected (command channel)');
     state.wsReconnectAttempts = 0;
-    if (state.sessionsRestored) {
-      checkAndReconnectActiveSessions();
-    }
-    // Resubscribe to current session on reconnection
-    const activeSession = getActiveSession();
-    if (activeSession && activeSession.sessionId) {
-      subscribeToSession(activeSession.sessionId);
-    }
-  };
-
-  state.ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    handleWsMessage(msg);
   };
 
   state.ws.onclose = () => {
     console.log('[WS] Disconnected');
     state.wsReconnectAttempts++;
-    // Clear subscription state on disconnect
-    state.currentSubscribedSessionId = null;
     const delay = Math.min(1000 * Math.pow(2, state.wsReconnectAttempts), 30000);
     setTimeout(connectWebSocket, delay);
   };
@@ -1047,6 +975,95 @@ function connectWebSocket() {
   state.ws.onerror = (err) => {
     console.error('[WS] Error:', err);
   };
+}
+
+function connectEventStream() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+
+  const es = new EventSource(`/api/events?token=${state.token}`);
+  state.eventSource = es;
+
+  es.onopen = () => {
+    console.log('[SSE] Connected');
+    state.sseConnected = true;
+  };
+
+  es.onmessage = (e) => {
+    try {
+      const event = JSON.parse(e.data);
+      handleServerEvent(event);
+    } catch (err) {
+      console.warn('[SSE] Parse error:', err);
+    }
+  };
+
+  es.onerror = () => {
+    state.sseConnected = false;
+    if (es.readyState === EventSource.CLOSED) {
+      console.log('[SSE] Connection closed, reconnecting in 2s');
+      setTimeout(connectEventStream, 2000);
+    }
+  };
+}
+
+function handleServerEvent(event) {
+  if (event.type === 'heartbeat') return;
+
+  if (event.type === 'state-snapshot') {
+    if (event.sessions) {
+      for (const serverSession of event.sessions) {
+        const localSession = getSessionBySessionId(serverSession.sessionId);
+        if (localSession) {
+          localSession.isStreaming = (serverSession.status === 'streaming');
+        }
+      }
+    }
+    const activeSession = getActiveSession();
+    if (activeSession) {
+      if (activeSession.isStreaming) {
+        abortBtn.classList.remove('hidden');
+        chatInput.disabled = true;
+        sendBtn.disabled = true;
+        modeBtn.disabled = true;
+        attachBtn.disabled = true;
+      } else {
+        abortBtn.classList.add('hidden');
+        chatInput.disabled = false;
+        sendBtn.disabled = false;
+        modeBtn.disabled = false;
+        attachBtn.disabled = false;
+      }
+    }
+    return;
+  }
+
+  if (event.type === 'session-status') {
+    const session = getSessionBySessionId(event.sessionId);
+    if (session) {
+      session.isStreaming = (event.status === 'streaming');
+      if (state.sessions.indexOf(session) === state.activeSessionIndex) {
+        if (session.isStreaming) {
+          abortBtn.classList.remove('hidden');
+          chatInput.disabled = true;
+          sendBtn.disabled = true;
+          modeBtn.disabled = true;
+          attachBtn.disabled = true;
+        } else {
+          abortBtn.classList.add('hidden');
+          chatInput.disabled = false;
+          sendBtn.disabled = false;
+          modeBtn.disabled = false;
+          attachBtn.disabled = false;
+        }
+      }
+    }
+    return;
+  }
+
+  handleWsMessage(event);
 }
 
 function handleWsMessage(msg) {
@@ -1057,7 +1074,6 @@ function handleWsMessage(msg) {
     if (session) {
       session.sessionId = msg.sessionId;
       saveSessionState();
-      subscribeToSession(msg.sessionId);
     }
   } else if (msg.sessionId) {
     session = getSessionBySessionId(msg.sessionId);
@@ -1100,42 +1116,6 @@ function handleWsMessage(msg) {
       sendNotification('Error', msg.message);
       finishStreaming(session);
       if (isInactive) { session.hasUnread = true; renderSessionBar(); }
-      break;
-    case 'session-active':
-      if (msg.active && session) {
-        session.isStreaming = true;
-        session.pendingText = '';
-        // Send subscribe to bind this WS to the active stream
-        state.ws.send(JSON.stringify({
-          type: 'subscribe',
-          sessionId: msg.sessionId
-        }));
-        // Update UI if this is the active session
-        if (state.sessions.indexOf(session) === state.activeSessionIndex) {
-          abortBtn.classList.remove('hidden');
-          chatInput.disabled = true;
-          sendBtn.disabled = true;
-          modeBtn.disabled = true;
-          attachBtn.disabled = true;
-        }
-      }
-      break;
-    case 'subscribe-result':
-      if (session) {
-        if (!msg.success) {
-          // Stream ended between check and subscribe — treat as completed
-          session.isStreaming = false;
-          if (state.sessions.indexOf(session) === state.activeSessionIndex) {
-            abortBtn.classList.add('hidden');
-            chatInput.disabled = false;
-            sendBtn.disabled = false;
-            modeBtn.disabled = false;
-            attachBtn.disabled = false;
-          }
-        } else {
-          console.log('[WS] Reconnected to active stream:', msg.sessionId);
-        }
-      }
       break;
     // Task panel WebSocket handlers
     case 'task-started':
@@ -3187,9 +3167,6 @@ async function loadSessionHistory(session) {
   }
 
   session.needsHistoryLoad = false;
-
-  // Subscribe to session for multi-user sync
-  subscribeToSession(session.sessionId);
 }
 
 async function resumeSession(sessionId, skipHashUpdate = false) {
@@ -3202,9 +3179,6 @@ async function resumeSession(sessionId, skipHashUpdate = false) {
   closeSidebar();
 
   await loadSessionHistory(session);
-
-  // Subscribe to session for multi-user sync
-  subscribeToSession(sessionId);
 
   enableChat();
   saveSessionState();

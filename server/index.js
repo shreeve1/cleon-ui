@@ -13,11 +13,13 @@ import rateLimit from 'express-rate-limit';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
-import { handleChat, handleAbort, handleQuestionResponse, handlePlanResponse, isSessionActive, resubscribeSession } from './claude.js';
+import { handleChat, handleAbort, handleQuestionResponse, handlePlanResponse } from './claude.js';
 import { getAllCommands } from './commands.js';
 import { processUpload, validateFile } from './uploads.js';
 import logger from './logger.js';
-import { subscribeToSession, unsubscribeFromSession, replayBufferToClient } from './broadcast.js';
+import { subscribe, publish } from './bus.js';
+import { getSessionsForUser } from './session-registry.js';
+import { replayBufferToSSE } from './broadcast.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,6 +150,57 @@ app.post('/api/upload', authenticateToken, upload.single('file'), async (req, re
   }
 });
 
+// SSE Event Stream
+app.get('/api/events', (req, res) => {
+  const token = req.query.token;
+  const user = authenticateWebSocket(token);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  logger.info('SSE connected', { username: user.username });
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  if (res.socket) res.socket.setNoDelay(true);
+  res.flushHeaders();
+  res.write('retry: 2000\n\n');
+
+  const userSessions = getSessionsForUser(user.username);
+  res.write(`data: ${JSON.stringify({ type: 'state-snapshot', sessions: userSessions })}\n\n`);
+
+  for (const s of userSessions.filter(s => s.status === 'streaming')) {
+    replayBufferToSSE(s.sessionId, res);
+  }
+
+  const unsubscribe = subscribe(user.username, (event) => {
+    try {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    } catch (err) {
+      logger.error('SSE write error', { username: user.username, error: err.message });
+    }
+  });
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'heartbeat' })}\n\n`);
+    } catch (err) {
+      clearInterval(heartbeat);
+    }
+  }, 30000);
+
+  req.on('close', () => {
+    logger.info('SSE disconnected', { username: user.username });
+    unsubscribe();
+    clearInterval(heartbeat);
+  });
+});
+
 // SPA fallback - serve index.html for all non-API routes
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api')) {
@@ -198,16 +251,16 @@ wss.on('connection', (ws, req) => {
 
       switch (msg.type) {
         case 'chat':
-          await handleChat(msg, ws);
+          await handleChat(msg, ws, user.username);
           break;
 
         case 'abort':
           const success = await handleAbort(msg.sessionId);
-          ws.send(JSON.stringify({
+          publish(user.username, {
             type: 'abort-result',
             sessionId: msg.sessionId,
             success
-          }));
+          });
           break;
 
         case 'question-response':
@@ -216,11 +269,11 @@ wss.on('connection', (ws, req) => {
             msg.toolUseId,
             msg.answers
           );
-          ws.send(JSON.stringify({
+          publish(user.username, {
             type: 'question-response-result',
             sessionId: msg.sessionId,
             success: responseSuccess
-          }));
+          });
           break;
 
         case 'plan-response': {
@@ -230,51 +283,16 @@ wss.on('connection', (ws, req) => {
             msg.approved,
             msg.feedback
           );
-          ws.send(JSON.stringify({
+          publish(user.username, {
             type: 'plan-response-result',
             sessionId: msg.sessionId,
             success: planSuccess
-          }));
+          });
           break;
         }
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
-          break;
-
-        case 'check-active':
-          ws.send(JSON.stringify({
-            type: 'session-active',
-            sessionId: msg.sessionId,
-            active: isSessionActive(msg.sessionId)
-          }));
-          break;
-
-        case 'subscribe':
-          const isActive = isSessionActive(msg.sessionId);
-
-          if (isActive) {
-            // Subscribe this WebSocket to the session (supports multi-user)
-            subscribeToSession(msg.sessionId, ws);
-
-            // Also update sessionInfo.ws for reconnection compatibility
-            resubscribeSession(msg.sessionId, ws);
-
-            ws.send(JSON.stringify({
-              type: 'subscribe-result',
-              sessionId: msg.sessionId,
-              success: true
-            }));
-            // Replay buffered messages to catch up late-joining client
-            replayBufferToClient(msg.sessionId, ws);
-          } else {
-            ws.send(JSON.stringify({
-              type: 'subscribe-result',
-              sessionId: msg.sessionId,
-              success: false,
-              error: 'Session not active'
-            }));
-          }
           break;
 
         default:
@@ -293,13 +311,6 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     logger.info('WebSocket disconnected', { username: user.username });
-
-    // Clean up all subscriptions for this WebSocket
-    if (ws.subscribedSessions) {
-      for (const sessionId of ws.subscribedSessions) {
-        unsubscribeFromSession(sessionId, ws);
-      }
-    }
   });
 
   ws.on('error', (err) => {

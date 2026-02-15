@@ -4,7 +4,9 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import { taskManager, broadcastTaskUpdate } from './tasks.js';
-import { broadcastToSession, subscribeToSession, clearSessionSubscribers, startSessionBuffer } from './broadcast.js';
+import { broadcastToSession, startSessionBuffer } from './broadcast.js';
+import { publish } from './bus.js';
+import { register, setStatus } from './session-registry.js';
 
 // Constants
 const DEFAULT_CONTEXT_WINDOW = 200000;
@@ -184,7 +186,7 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
           type: 'token-usage',
           sessionId: message.session_id,
           ...usage
-        });
+        }, sessionInfo.username);
       }
     }
 
@@ -196,7 +198,7 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
         type: 'claude-message',
         sessionId: message.session_id,
         data: transformed
-      });
+      }, sessionInfo.username);
     }
   }
 }
@@ -204,8 +206,9 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
 /**
  * Handle incoming chat message from WebSocket
  */
-export async function handleChat(msg, ws) {
+export async function handleChat(msg, ws, username) {
   const { content, projectPath, sessionId, isNewSession, mode, attachments } = msg;
+  const projectDisplayName = projectPath ? projectPath.split('/').pop() : '';
 
   const permissionModeMap = {
     'default': 'default',
@@ -269,7 +272,7 @@ export async function handleChat(msg, ws) {
 
 
   // Create session info object (mutable WS reference for reconnection support)
-  const sessionInfo = { queryInstance: null, ws };
+  const sessionInfo = { queryInstance: null, ws, username };
 
   const options = {
     cwd: projectPath,
@@ -286,7 +289,6 @@ export async function handleChat(msg, ws) {
       if (toolName === 'AskUserQuestion') {
         console.log(`[Claude] AskUserQuestion intercepted - toolUseId: ${toolUseID}`);
 
-        // Send question to frontend
         sendMessage(sessionInfo.ws, {
           type: 'claude-message',
           sessionId: currentSessionId,
@@ -295,7 +297,7 @@ export async function handleChat(msg, ws) {
             id: toolUseID,
             questions: input.questions || []
           }
-        });
+        }, username);
 
         // Wait for user response
         try {
@@ -332,7 +334,6 @@ export async function handleChat(msg, ws) {
       if (toolName === 'ExitPlanMode') {
         console.log(`[Claude] ExitPlanMode intercepted - toolUseId: ${toolUseID}`);
 
-        // Send confirmation request to frontend
         sendMessage(sessionInfo.ws, {
           type: 'claude-message',
           sessionId: currentSessionId,
@@ -340,7 +341,7 @@ export async function handleChat(msg, ws) {
             type: 'plan-confirmation',
             id: toolUseID
           }
-        });
+        }, username);
 
         // Wait for user approval/rejection
         try {
@@ -425,7 +426,8 @@ export async function handleChat(msg, ws) {
     if (currentSessionId) {
       activeSessions.set(currentSessionId, sessionInfo);
       startSessionBuffer(currentSessionId);
-      subscribeToSession(currentSessionId, ws);
+      register(currentSessionId, { username, projectPath, projectName: projectDisplayName, displayName: projectDisplayName, status: 'streaming' });
+      publish(username, { type: 'session-status', sessionId: currentSessionId, status: 'streaming' });
     }
 
     // Process streaming messages
@@ -434,11 +436,12 @@ export async function handleChat(msg, ws) {
         currentSessionId = sid;
         startSessionBuffer(currentSessionId);
         activeSessions.set(currentSessionId, sessionInfo);
-        subscribeToSession(currentSessionId, ws);
+        register(currentSessionId, { username, projectPath, projectName: projectDisplayName, displayName: projectDisplayName, status: 'streaming' });
         sendMessage(sessionInfo.ws, {
           type: 'session-created',
           sessionId: currentSessionId
-        });
+        }, username);
+        publish(username, { type: 'session-status', sessionId: currentSessionId, status: 'streaming' });
       }
     });
 
@@ -447,7 +450,7 @@ export async function handleChat(msg, ws) {
     sendMessage(sessionInfo.ws, {
       type: 'claude-done',
       sessionId: currentSessionId
-    });
+    }, username);
 
   } catch (err) {
     console.error('[Claude] Query error:', err);
@@ -455,13 +458,12 @@ export async function handleChat(msg, ws) {
       type: 'error',
       sessionId: currentSessionId || msg.sessionId || null,
       message: err.message || 'Query failed'
-    });
+    }, username);
   } finally {
     if (currentSessionId) {
       activeSessions.delete(currentSessionId);
-      // Clean up all subscribers for this session
-      clearSessionSubscribers(currentSessionId);
-      // Clean up tasks for this session
+      setStatus(currentSessionId, 'idle');
+      publish(username, { type: 'session-status', sessionId: currentSessionId, status: 'idle' });
       taskManager.clearSession(currentSessionId);
       // Clean up tool use to task mappings for this session
       for (const [toolUseId, taskId] of toolUseToTaskMap) {
@@ -508,9 +510,6 @@ export async function handleAbort(sessionId) {
     }
 
     activeSessions.delete(sessionId);
-    // Clean up all subscribers for this session
-    clearSessionSubscribers(sessionId);
-    // Clean up tasks for this session
     taskManager.clearSession(sessionId);
     // Clean up tool use to task mappings for this session
     for (const [toolUseId, taskId] of toolUseToTaskMap) {
@@ -524,8 +523,6 @@ export async function handleAbort(sessionId) {
   } catch (err) {
     console.error(`[Claude] Abort error for ${sessionId}:`, err);
     activeSessions.delete(sessionId);
-    // Still clean up subscribers even on error
-    clearSessionSubscribers(sessionId);
     return false;
   }
 }
@@ -545,9 +542,6 @@ export function resubscribeSession(sessionId, newWs) {
   const sessionInfo = activeSessions.get(sessionId);
   if (!sessionInfo) return false;
   sessionInfo.ws = newWs;
-
-  // Also subscribe to broadcast manager for multi-user support
-  subscribeToSession(sessionId, newWs);
 
   return true;
 }
@@ -597,13 +591,17 @@ export async function handlePlanResponse(sessionId, toolUseId, approved, feedbac
  * Send message to WebSocket (handles stringify + error checking)
  * Broadcasts to all session subscribers if sessionId is present
  */
-function sendMessage(ws, data) {
+function sendMessage(ws, data, username) {
   if (data.sessionId) {
-    // Broadcast to all subscribers (includes originating WS if subscribed)
+    // Buffer for SSE replay
     broadcastToSession(data.sessionId, data);
+    // Publish to event bus for SSE delivery
+    if (username) {
+      publish(username, data);
+    }
   } else {
-    // No sessionId - fall back to direct send (for messages without sessions)
-    if (ws.readyState === 1) { // WebSocket.OPEN
+    // No sessionId - fall back to direct WS send
+    if (ws && ws.readyState === 1) { // WebSocket.OPEN
       ws.send(JSON.stringify(data));
     }
   }

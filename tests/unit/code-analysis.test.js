@@ -1,5 +1,5 @@
 /**
- * Static code analysis tests for auto-reconnect feature
+ * Static code analysis tests for SSE Event Bus architecture
  * Verifies code structure without requiring runtime imports of heavy dependencies
  */
 import { describe, it, expect } from 'vitest';
@@ -14,14 +14,12 @@ const appJs = readFileSync(resolve('public/app.js'), 'utf8');
 describe('server/claude.js - code structure', () => {
   describe('sendMessage calls use sessionInfo.ws', () => {
     it('should have NO sendMessage(ws, ...) calls (only sendMessage(sessionInfo.ws, ...))', () => {
-      // Find all sendMessage calls, excluding the function definition itself
       const lines = claudeJs.split('\n');
       const bareWsCalls = [];
       const sessionInfoWsCalls = [];
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        // Skip the function definition line
         if (line.startsWith('function sendMessage(ws,')) continue;
 
         if (line.includes('sendMessage(ws,')) {
@@ -56,8 +54,8 @@ describe('server/claude.js - code structure', () => {
       expect(sessionInfoIndex).toBeLessThan(optionsIndex);
     });
 
-    it('sessionInfo should be initialized with queryInstance: null and ws', () => {
-      expect(claudeJs).toMatch(/const sessionInfo = \{\s*queryInstance:\s*null,\s*ws\s*\}/);
+    it('sessionInfo should be initialized with queryInstance: null, ws, and username', () => {
+      expect(claudeJs).toMatch(/const sessionInfo = \{\s*queryInstance:\s*null,\s*ws,\s*username\s*\}/);
     });
   });
 
@@ -80,7 +78,6 @@ describe('server/claude.js - code structure', () => {
 
   describe('canUseTool uses sessionInfo.ws', () => {
     it('should use sendMessage(sessionInfo.ws, ...) inside canUseTool callback', () => {
-      // Extract the canUseTool section
       const canUseToolStart = claudeJs.indexOf('canUseTool:');
       const canUseToolEnd = claudeJs.indexOf('// Allow all other tools', canUseToolStart);
       const canUseToolSection = claudeJs.slice(canUseToolStart, canUseToolEnd);
@@ -89,244 +86,215 @@ describe('server/claude.js - code structure', () => {
       expect(canUseToolSection).not.toMatch(/sendMessage\(ws,/);
     });
   });
+
+  describe('bus and registry integration', () => {
+    it('should import publish from bus.js', () => {
+      expect(claudeJs).toMatch(/import\s*\{[^}]*publish[^}]*\}\s*from\s*'\.\/bus\.js'/);
+    });
+
+    it('should import register and setStatus from session-registry.js', () => {
+      expect(claudeJs).toMatch(/import\s*\{[^}]*register[^}]*setStatus[^}]*\}\s*from\s*'\.\/session-registry\.js'/);
+    });
+
+    it('handleChat should accept username parameter', () => {
+      expect(claudeJs).toMatch(/export async function handleChat\(msg,\s*ws,\s*username\)/);
+    });
+
+    it('sendMessage should accept username parameter', () => {
+      expect(claudeJs).toMatch(/function sendMessage\(ws,\s*data,\s*username\)/);
+    });
+
+    it('sendMessage should call broadcastToSession and publish', () => {
+      const fnStart = claudeJs.indexOf('function sendMessage(ws, data, username)');
+      const fnEnd = claudeJs.indexOf('\n}', fnStart);
+      const fnBody = claudeJs.slice(fnStart, fnEnd);
+
+      expect(fnBody).toContain('broadcastToSession(data.sessionId, data)');
+      expect(fnBody).toContain('publish(username, data)');
+    });
+  });
 });
 
 // ─── server/index.js code analysis ───────────────────────────────
 describe('server/index.js - code structure', () => {
   describe('imports', () => {
-    it('should import isSessionActive from claude.js', () => {
-      expect(indexJs).toContain('isSessionActive');
+    it('should import handleChat, handleAbort, handleQuestionResponse, handlePlanResponse from claude.js', () => {
+      expect(indexJs).toMatch(/import\s*\{[^}]*handleChat[^}]*handleAbort[^}]*handleQuestionResponse[^}]*handlePlanResponse[^}]*\}\s*from\s*'\.\/claude\.js'/);
     });
 
-    it('should import resubscribeSession from claude.js', () => {
-      expect(indexJs).toContain('resubscribeSession');
+    it('should NOT import isSessionActive or resubscribeSession from claude.js', () => {
+      const claudeImport = indexJs.match(/import\s*\{[^}]*\}\s*from\s*'\.\/claude\.js'/);
+      expect(claudeImport).toBeTruthy();
+      expect(claudeImport[0]).not.toContain('isSessionActive');
+      expect(claudeImport[0]).not.toContain('resubscribeSession');
     });
 
-    it('should have a single import line with all required functions', () => {
-      expect(indexJs).toMatch(/import\s*\{[^}]*handleChat[^}]*handleAbort[^}]*handleQuestionResponse[^}]*handlePlanResponse[^}]*isSessionActive[^}]*resubscribeSession[^}]*\}\s*from\s*'\.\/claude\.js'/);
-    });
-  });
-
-  describe('check-active handler', () => {
-    it('should have a check-active case in the switch', () => {
-      expect(indexJs).toMatch(/case\s*'check-active'/);
+    it('should import subscribe and publish from bus.js', () => {
+      expect(indexJs).toMatch(/import\s*\{[^}]*subscribe[^}]*publish[^}]*\}\s*from\s*'\.\/bus\.js'/);
     });
 
-    it('should respond with session-active type', () => {
-      expect(indexJs).toMatch(/type:\s*'session-active'/);
+    it('should import getSessionsForUser from session-registry.js', () => {
+      expect(indexJs).toMatch(/import\s*\{[^}]*getSessionsForUser[^}]*\}\s*from\s*'\.\/session-registry\.js'/);
     });
 
-    it('should include sessionId in the response', () => {
-      // Find the check-active case block
-      const checkActiveStart = indexJs.indexOf("case 'check-active'");
-      const checkActiveEnd = indexJs.indexOf('break;', checkActiveStart);
-      const checkActiveBlock = indexJs.slice(checkActiveStart, checkActiveEnd);
-
-      expect(checkActiveBlock).toContain('sessionId: msg.sessionId');
-    });
-
-    it('should call isSessionActive with msg.sessionId', () => {
-      expect(indexJs).toMatch(/isSessionActive\(msg\.sessionId\)/);
-    });
-
-    it('should use direct ws.send (not sendMessage helper)', () => {
-      const checkActiveStart = indexJs.indexOf("case 'check-active'");
-      const checkActiveEnd = indexJs.indexOf('break;', checkActiveStart);
-      const checkActiveBlock = indexJs.slice(checkActiveStart, checkActiveEnd);
-
-      expect(checkActiveBlock).toContain('ws.send(');
+    it('should import replayBufferToSSE from broadcast.js', () => {
+      expect(indexJs).toMatch(/import\s*\{[^}]*replayBufferToSSE[^}]*\}\s*from\s*'\.\/broadcast\.js'/);
     });
   });
 
-  describe('subscribe handler', () => {
-    it('should have a subscribe case in the switch', () => {
-      expect(indexJs).toMatch(/case\s*'subscribe'/);
+  describe('SSE endpoint', () => {
+    it('should have GET /api/events endpoint', () => {
+      expect(indexJs).toContain("app.get('/api/events'");
     });
 
-    it('should respond with subscribe-result type', () => {
-      expect(indexJs).toMatch(/type:\s*'subscribe-result'/);
+    it('should send state-snapshot on SSE connect', () => {
+      const sseStart = indexJs.indexOf("app.get('/api/events'");
+      const sseEnd = indexJs.indexOf('\n});', sseStart);
+      const sseBody = indexJs.slice(sseStart, sseEnd);
+
+      expect(sseBody).toContain("type: 'state-snapshot'");
+      expect(sseBody).toContain('getSessionsForUser');
     });
 
-    it('should include sessionId in the response', () => {
-      const subscribeStart = indexJs.indexOf("case 'subscribe'");
-      const subscribeEnd = indexJs.indexOf('break;', subscribeStart);
-      const subscribeBlock = indexJs.slice(subscribeStart, subscribeEnd);
+    it('should subscribe to bus for event delivery', () => {
+      const sseStart = indexJs.indexOf("app.get('/api/events'");
+      const sseEnd = indexJs.indexOf('\n});', sseStart);
+      const sseBody = indexJs.slice(sseStart, sseEnd);
 
-      expect(subscribeBlock).toContain('sessionId: msg.sessionId');
+      expect(sseBody).toContain('subscribe(user.username');
+    });
+  });
+
+  describe('WS handler uses publish for responses', () => {
+    it('should NOT have check-active or subscribe cases', () => {
+      expect(indexJs).not.toMatch(/case\s*'check-active'/);
+      expect(indexJs).not.toMatch(/case\s*'subscribe'/);
     });
 
-    it('should call resubscribeSession with msg.sessionId and ws', () => {
-      expect(indexJs).toMatch(/resubscribeSession\(msg\.sessionId,\s*ws\)/);
+    it('abort uses publish(user.username, ...)', () => {
+      const abortStart = indexJs.indexOf("case 'abort'");
+      const abortEnd = indexJs.indexOf('break;', abortStart);
+      const abortBody = indexJs.slice(abortStart, abortEnd);
+
+      expect(abortBody).toContain('publish(user.username');
     });
 
-    it('should include success field in response', () => {
-      const subscribeStart = indexJs.indexOf("case 'subscribe'");
-      const subscribeEnd = indexJs.indexOf('break;', subscribeStart);
-      const subscribeBlock = indexJs.slice(subscribeStart, subscribeEnd);
+    it('question-response uses publish(user.username, ...)', () => {
+      const qrStart = indexJs.indexOf("case 'question-response'");
+      const qrEnd = indexJs.indexOf('break;', qrStart);
+      const qrBody = indexJs.slice(qrStart, qrEnd);
 
-      expect(subscribeBlock).toContain('success:');
+      expect(qrBody).toContain('publish(user.username');
+    });
+
+    it('plan-response uses publish(user.username, ...)', () => {
+      const prStart = indexJs.indexOf("case 'plan-response'");
+      const prEnd = indexJs.indexOf('break;', prStart);
+      const prBody = indexJs.slice(prStart, prEnd);
+
+      expect(prBody).toContain('publish(user.username');
     });
   });
 });
 
 // ─── public/app.js code analysis ─────────────────────────────────
 describe('public/app.js - code structure', () => {
-  describe('state.sessionsRestored flag', () => {
-    it('should have sessionsRestored in the state object', () => {
-      expect(appJs).toMatch(/sessionsRestored:\s*false/);
+  describe('SSE client connection', () => {
+    it('should define connectEventStream function', () => {
+      expect(appJs).toMatch(/function connectEventStream\(\)/);
+    });
+
+    it('should define handleServerEvent function', () => {
+      expect(appJs).toMatch(/function handleServerEvent\(event\)/);
+    });
+
+    it('connectEventStream should use EventSource API', () => {
+      const fnStart = appJs.indexOf('function connectEventStream()');
+      const fnEnd = appJs.indexOf('\n}', fnStart + 200);
+      const fnBody = appJs.slice(fnStart, fnEnd);
+
+      expect(fnBody).toContain('new EventSource(');
+      expect(fnBody).toContain('/api/events');
     });
   });
 
-  describe('checkAndReconnectActiveSessions function', () => {
-    it('should define checkAndReconnectActiveSessions function', () => {
-      expect(appJs).toMatch(/function checkAndReconnectActiveSessions\(\)/);
-    });
-
-    it('should check WebSocket readyState before sending', () => {
-      const fnStart = appJs.indexOf('function checkAndReconnectActiveSessions()');
+  describe('handleServerEvent handles SSE event types', () => {
+    it('should handle heartbeat events', () => {
+      const fnStart = appJs.indexOf('function handleServerEvent(event)');
       const fnEnd = appJs.indexOf('\n}', fnStart);
       const fnBody = appJs.slice(fnStart, fnEnd);
 
-      expect(fnBody).toContain('readyState');
-      expect(fnBody).toContain('WebSocket.OPEN');
+      expect(fnBody).toContain("event.type === 'heartbeat'");
     });
 
-    it('should iterate over state.sessions', () => {
-      const fnStart = appJs.indexOf('function checkAndReconnectActiveSessions()');
+    it('should handle state-snapshot events', () => {
+      const fnStart = appJs.indexOf('function handleServerEvent(event)');
       const fnEnd = appJs.indexOf('\n}', fnStart);
       const fnBody = appJs.slice(fnStart, fnEnd);
 
-      expect(fnBody).toContain('state.sessions');
+      expect(fnBody).toContain("event.type === 'state-snapshot'");
     });
 
-    it('should send check-active message for sessions with sessionId', () => {
-      const fnStart = appJs.indexOf('function checkAndReconnectActiveSessions()');
+    it('should handle session-status events', () => {
+      const fnStart = appJs.indexOf('function handleServerEvent(event)');
       const fnEnd = appJs.indexOf('\n}', fnStart);
       const fnBody = appJs.slice(fnStart, fnEnd);
 
-      expect(fnBody).toContain("type: 'check-active'");
-      expect(fnBody).toContain('session.sessionId');
+      expect(fnBody).toContain("event.type === 'session-status'");
     });
-  });
 
-  describe('ws.onopen calls checkAndReconnectActiveSessions', () => {
-    it('should check sessionsRestored flag in onopen handler', () => {
-      const onopenStart = appJs.indexOf('state.ws.onopen');
-      const onopenEnd = appJs.indexOf('};', onopenStart);
-      const onopenBody = appJs.slice(onopenStart, onopenEnd);
-
-      expect(onopenBody).toContain('state.sessionsRestored');
-      expect(onopenBody).toContain('checkAndReconnectActiveSessions()');
-    });
-  });
-
-  describe('restoreSessionState sets flag and calls reconnect', () => {
-    it('should set sessionsRestored = true in restoreSessionState', () => {
-      const fnStart = appJs.indexOf('async function restoreSessionState()');
-      const fnEnd = appJs.indexOf('\n}', fnStart + 100); // Skip past inner functions
+    it('should delegate non-SSE events to handleWsMessage', () => {
+      const fnStart = appJs.indexOf('function handleServerEvent(event)');
+      const fnEnd = appJs.indexOf('\n}', fnStart);
       const fnBody = appJs.slice(fnStart, fnEnd);
 
-      expect(fnBody).toContain('state.sessionsRestored = true');
+      expect(fnBody).toContain('handleWsMessage(event)');
+    });
+  });
+
+  describe('old WS subscription patterns removed', () => {
+    it('should NOT have sessionsRestored in state', () => {
+      expect(appJs).not.toMatch(/sessionsRestored:\s*false/);
     });
 
-    it('should call checkAndReconnectActiveSessions in restoreSessionState', () => {
-      const fnStart = appJs.indexOf('async function restoreSessionState()');
-      const fnEnd = appJs.indexOf('\n}', fnStart + 100);
+    it('should NOT define checkAndReconnectActiveSessions', () => {
+      expect(appJs).not.toContain('function checkAndReconnectActiveSessions');
+    });
+
+    it('should NOT have session-active case in handleWsMessage', () => {
+      expect(appJs).not.toMatch(/case\s*'session-active'/);
+    });
+
+    it('should NOT have subscribe-result case in handleWsMessage', () => {
+      expect(appJs).not.toMatch(/case\s*'subscribe-result'/);
+    });
+  });
+
+  describe('showMain connects both WS and SSE', () => {
+    it('showMain should call connectWebSocket', () => {
+      const fnStart = appJs.indexOf('function showMain()');
+      const fnEnd = appJs.indexOf('\n}', fnStart);
       const fnBody = appJs.slice(fnStart, fnEnd);
 
-      expect(fnBody).toContain('checkAndReconnectActiveSessions()');
+      expect(fnBody).toContain('connectWebSocket()');
+    });
+
+    it('showMain should call connectEventStream', () => {
+      const fnStart = appJs.indexOf('function showMain()');
+      const fnEnd = appJs.indexOf('\n}', fnStart);
+      const fnBody = appJs.slice(fnStart, fnEnd);
+
+      expect(fnBody).toContain('connectEventStream()');
     });
   });
 
-  describe('handleWsMessage handles session-active', () => {
-    it('should have a session-active case', () => {
-      expect(appJs).toMatch(/case\s*'session-active'/);
-    });
+  describe('WS is command-only', () => {
+    it('connectWebSocket should not set onmessage handler', () => {
+      const fnStart = appJs.indexOf('function connectWebSocket()');
+      const fnEnd = appJs.indexOf('\n}', fnStart);
+      const fnBody = appJs.slice(fnStart, fnEnd);
 
-    it('should set isStreaming = true on session-active', () => {
-      const caseStart = appJs.indexOf("case 'session-active'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('session.isStreaming = true');
-    });
-
-    it('should send subscribe message on session-active', () => {
-      const caseStart = appJs.indexOf("case 'session-active'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain("type: 'subscribe'");
-    });
-
-    it('should disable input controls for active session', () => {
-      const caseStart = appJs.indexOf("case 'session-active'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('chatInput.disabled = true');
-      expect(caseBody).toContain('sendBtn.disabled = true');
-      expect(caseBody).toContain('modeBtn.disabled = true');
-      expect(caseBody).toContain('attachBtn.disabled = true');
-    });
-
-    it('should show abort button for active session', () => {
-      const caseStart = appJs.indexOf("case 'session-active'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain("abortBtn.classList.remove('hidden')");
-    });
-  });
-
-  describe('handleWsMessage handles subscribe-result', () => {
-    it('should have a subscribe-result case', () => {
-      expect(appJs).toMatch(/case\s*'subscribe-result'/);
-    });
-
-    it('should handle failed subscribe (stream ended)', () => {
-      const caseStart = appJs.indexOf("case 'subscribe-result'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('!msg.success');
-      expect(caseBody).toContain('session.isStreaming = false');
-    });
-
-    it('should re-enable UI on failed subscribe', () => {
-      const caseStart = appJs.indexOf("case 'subscribe-result'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('chatInput.disabled = false');
-      expect(caseBody).toContain('sendBtn.disabled = false');
-      expect(caseBody).toContain("abortBtn.classList.add('hidden')");
-    });
-
-    it('should log success on successful subscribe', () => {
-      const caseStart = appJs.indexOf("case 'subscribe-result'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('Reconnected to active stream');
-    });
-  });
-
-  describe('session-active and subscribe-result check active session index', () => {
-    it('session-active should check if session is the active session before UI changes', () => {
-      const caseStart = appJs.indexOf("case 'session-active'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('state.activeSessionIndex');
-    });
-
-    it('subscribe-result should check if session is the active session before UI changes', () => {
-      const caseStart = appJs.indexOf("case 'subscribe-result'");
-      const caseEnd = appJs.indexOf('break;', caseStart);
-      const caseBody = appJs.slice(caseStart, caseEnd);
-
-      expect(caseBody).toContain('state.activeSessionIndex');
+      expect(fnBody).not.toContain('onmessage');
     });
   });
 });
