@@ -581,6 +581,91 @@ body::after {
   display: flex;
 }
 
+/* Activity Status Bar */
+.activity-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bg-light);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+  font-family: monospace;
+  min-height: 28px;
+  flex-shrink: 0;
+  transition: opacity 0.2s ease, max-height 0.2s ease;
+  max-height: 40px;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.activity-status.hidden {
+  display: none;
+}
+
+/* Animated indicator dot */
+.activity-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+}
+
+.activity-indicator.thinking {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
+  animation: activity-pulse 1.5s ease-in-out infinite;
+}
+
+.activity-indicator.tool_executing {
+  background: var(--neon-purple);
+  box-shadow: 0 0 8px var(--neon-purple);
+  animation: activity-spin 1s linear infinite;
+  border-radius: 2px;
+}
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+@keyframes activity-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Label text */
+.activity-label {
+  color: var(--neon-cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Elapsed timer */
+.activity-elapsed {
+  color: var(--text-dim);
+  font-family: monospace;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.activity-elapsed.hidden {
+  display: none;
+}
+
+/* Mobile responsive */
+@media (max-width: 767px) {
+  .activity-status {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    min-height: 24px;
+  }
+}
+
 /* Session status bar */
 #session-bar {
   display: none;
@@ -2674,5 +2759,11 @@ body::after {
   }
   .skill-btn:active {
     transform: none;
+  }
+
+  /* Disable activity indicator animations */
+  .activity-indicator.thinking,
+  .activity-indicator.tool_executing {
+    animation: none;
   }
 }

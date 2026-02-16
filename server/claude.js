@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { taskManager, broadcastTaskUpdate } from './tasks.js';
 import { broadcastToSession, startSessionBuffer } from './broadcast.js';
 import { publish } from './bus.js';
+import { createActivityTracker } from './activity.js';
 import { register, setStatus } from './session-registry.js';
 
 // Constants
@@ -169,6 +170,10 @@ const toolUseToTaskMap = new Map();
  * Captures model information and adds it to messages
  */
 async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
+  if (sessionInfo.activityTracker) {
+    sessionInfo.activityTracker.startThinking();
+  }
+
   for await (const message of queryInstance) {
     // Capture session ID from first message
     if (message.session_id && onSessionId) {
@@ -199,6 +204,18 @@ async function processQueryStream(queryInstance, ws, sessionInfo, onSessionId) {
         sessionId: message.session_id,
         data: transformed
       }, sessionInfo.username);
+    }
+
+    // Track activity based on message type
+    if (sessionInfo.activityTracker && transformed) {
+      if (transformed.type === 'tool_use') {
+        const summaryText = typeof transformed.summary === 'object'
+          ? transformed.summary.summary
+          : (transformed.summary || transformed.tool);
+        sessionInfo.activityTracker.startTool(transformed.tool, summaryText);
+      } else if (transformed.type === 'tool_result') {
+        sessionInfo.activityTracker.completeTool();
+      }
     }
   }
 }
@@ -272,7 +289,7 @@ export async function handleChat(msg, ws, username) {
 
 
   // Create session info object (mutable WS reference for reconnection support)
-  const sessionInfo = { queryInstance: null, ws, username };
+  const sessionInfo = { queryInstance: null, ws, username, activityTracker: null };
 
   const options = {
     cwd: projectPath,
@@ -429,6 +446,7 @@ export async function handleChat(msg, ws, username) {
       startSessionBuffer(currentSessionId);
       register(currentSessionId, { username, projectPath, projectName: projectDisplayName, displayName: projectDisplayName, status: 'streaming' });
       publish(username, { type: 'session-status', sessionId: currentSessionId, status: 'streaming' });
+      sessionInfo.activityTracker = createActivityTracker((event) => publish(username, event), currentSessionId);
     }
 
     // Process streaming messages
@@ -443,6 +461,7 @@ export async function handleChat(msg, ws, username) {
           sessionId: currentSessionId
         }, username);
         publish(username, { type: 'session-status', sessionId: currentSessionId, status: 'streaming' });
+        sessionInfo.activityTracker = createActivityTracker((event) => publish(username, event), currentSessionId);
       }
     });
 
@@ -455,12 +474,29 @@ export async function handleChat(msg, ws, username) {
 
   } catch (err) {
     console.error('[Claude] Query error:', err);
+
+    // Detect rate limit errors from Anthropic API
+    const errMsg = err.message || '';
+    const isRateLimit = errMsg.includes('429') ||
+                        errMsg.includes('rate limit') ||
+                        errMsg.includes('Rate limit') ||
+                        errMsg.includes('1302');
+
+    const userMessage = isRateLimit
+      ? 'Rate limit reached. The API is temporarily throttled — please wait a moment and try again.'
+      : errMsg || 'Query failed';
+
     sendMessage(sessionInfo.ws, {
       type: 'error',
       sessionId: currentSessionId || msg.sessionId || null,
-      message: err.message || 'Query failed'
+      message: userMessage
     }, username);
   } finally {
+    if (sessionInfo.activityTracker) {
+      sessionInfo.activityTracker.finish();
+      sessionInfo.activityTracker = null;
+    }
+
     if (currentSessionId) {
       activeSessions.delete(currentSessionId);
       setStatus(currentSessionId, 'idle');
@@ -508,6 +544,11 @@ export async function handleAbort(sessionId) {
 
     if (typeof sessionInfo.queryInstance.interrupt === 'function') {
       await sessionInfo.queryInstance.interrupt();
+    }
+
+    if (sessionInfo.activityTracker) {
+      sessionInfo.activityTracker.finish();
+      sessionInfo.activityTracker = null;
     }
 
     activeSessions.delete(sessionId);

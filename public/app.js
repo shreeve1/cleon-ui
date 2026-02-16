@@ -53,7 +53,8 @@ function createSession(project, sessionId = null) {
     isAtBottom: true,
     // Task panel state (per-session)
     tasks: [],                         // Active tasks array
-    taskPanelExpanded: false           // Task panel expand/collapse state
+    taskPanelExpanded: false,          // Task panel expand/collapse state
+    activityState: null                // Current AI activity state
   };
 }
 
@@ -225,6 +226,7 @@ function switchToSession(index) {
 
   newSession.containerEl.classList.add('active');
   newSession.hasUnread = false;
+  renderActivityStatus(newSession);
 
   // Lazy-load message history for restored sessions
   if (newSession.needsHistoryLoad) {
@@ -1215,6 +1217,20 @@ function handleWsMessage(msg) {
         syncTasks(session, msg.data.tasks || []);
       }
       break;
+    case 'agent-activity':
+      if (session) {
+        session.activityState = msg.state === 'idle' ? null : {
+          state: msg.state,
+          label: msg.label,
+          description: msg.description || null,
+          elapsed: msg.elapsed || null,
+          toolName: msg.toolName || null
+        };
+        if (session === getActiveSession()) {
+          renderActivityStatus(session);
+        }
+      }
+      break;
     case 'replay-start':
       if (session) {
         session.isReplaying = true;
@@ -1393,11 +1409,46 @@ function updateStreamingMessage(session) {
   scrollToBottom(session);
 }
 
+function renderActivityStatus(session) {
+  const el = document.getElementById('activity-status');
+  if (!el) return;
+
+  const labelEl = el.querySelector('.activity-label');
+  const elapsedEl = el.querySelector('.activity-elapsed');
+  const indicatorEl = el.querySelector('.activity-indicator');
+
+  if (!session || !session.activityState) {
+    el.classList.add('hidden');
+    indicatorEl.className = 'activity-indicator';
+    return;
+  }
+
+  const { state, label, description, elapsed } = session.activityState;
+
+  el.classList.remove('hidden');
+
+  // Set indicator animation class
+  indicatorEl.className = 'activity-indicator ' + state;
+
+  // Set label text
+  labelEl.textContent = description ? `${label} — ${description}` : (label || '');
+
+  // Set elapsed timer
+  if (elapsed != null) {
+    elapsedEl.textContent = `${elapsed}s`;
+    elapsedEl.classList.remove('hidden');
+  } else {
+    elapsedEl.classList.add('hidden');
+  }
+}
+
 function finishStreaming(session) {
   session = session || getActiveSession();
   if (!session) return;
   session.isStreaming = false;
   session.pendingPlanConfirmation = null;
+  session.activityState = null;
+  renderActivityStatus(session);
 
   // Ensure renderer is cleaned up
   if (session.streamingRenderer) {
