@@ -106,24 +106,69 @@ export async function getProjectCommands(projectPath) {
 }
 
 /**
- * Get all commands merged (global + project, with project taking precedence)
+ * Get skills from ~/.claude/skills/
+ * Only includes top-level skills that have a SKILL.md file.
+ * @returns {Promise<Array>} Array of skill objects
+ */
+export async function getSkills() {
+  const skillsDir = path.join(os.homedir(), '.claude', 'skills');
+  const skills = [];
+
+  try {
+    const entries = await fs.readdir(skillsDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const skillFile = path.join(skillsDir, entry.name, 'SKILL.md');
+      try {
+        const content = await fs.readFile(skillFile, 'utf-8');
+        const frontmatter = parseFrontmatter(content);
+
+        skills.push({
+          name: `/${frontmatter.name || entry.name}`,
+          description: frontmatter.description || `Run ${entry.name} skill`,
+          path: skillFile,
+          source: 'skill'
+        });
+      } catch {
+        // No SKILL.md in this directory - skip it
+      }
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn(`[Skills] Error reading ${skillsDir}:`, err.message);
+    }
+  }
+
+  return skills;
+}
+
+/**
+ * Get all commands merged (skills + global + project, with project taking precedence)
  * @param {string} projectPath - Optional project path
  * @returns {Promise<Array>} Merged array of commands
  */
 export async function getAllCommands(projectPath) {
-  const [globalCommands, projectCommands] = await Promise.all([
+  const [globalCommands, projectCommands, skills] = await Promise.all([
     getGlobalCommands(),
-    getProjectCommands(projectPath)
+    getProjectCommands(projectPath),
+    getSkills()
   ]);
 
-  // Create a map with global commands first, then overlay project commands
   const commandMap = new Map();
 
+  // Skills first (lowest precedence)
+  for (const skill of skills) {
+    commandMap.set(skill.name, skill);
+  }
+
+  // Global commands override skills
   for (const cmd of globalCommands) {
     commandMap.set(cmd.name, cmd);
   }
 
-  // Project commands override global commands with the same name
+  // Project commands override global commands and skills
   for (const cmd of projectCommands) {
     commandMap.set(cmd.name, cmd);
   }

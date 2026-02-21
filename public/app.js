@@ -2574,7 +2574,7 @@ function renderSlashCommands(commands) {
 
   slashCommandsEl.innerHTML = commands.map((cmd, i) => {
     const sourceClass = `source-${cmd.source || 'builtin'}`;
-    const sourceLabel = cmd.source === 'global' ? 'global' : cmd.source === 'project' ? 'project' : '';
+    const sourceLabel = ['global', 'project', 'skill'].includes(cmd.source) ? cmd.source : '';
     return `
       <div class="slash-command${i === 0 ? ' selected' : ''}" data-command="${escapeAttr(cmd.name)}">
         <div class="slash-command-header">

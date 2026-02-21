@@ -25,6 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Express app
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 // Security middleware
@@ -73,7 +74,8 @@ const limiter = rateLimit({
   max: 100, // limit each IP to 100 requests per windowMs
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false }
 });
 app.use('/api/', limiter);
 
@@ -81,7 +83,8 @@ app.use('/api/', limiter);
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10, // only 10 login/register attempts per 15 min
-  message: { error: 'Too many authentication attempts, please try again later' }
+  message: { error: 'Too many authentication attempts, please try again later' },
+  validate: { xForwardedForHeader: false }
 });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
