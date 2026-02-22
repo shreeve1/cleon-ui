@@ -1591,11 +1591,11 @@ body::after {
 .skill-btn {
   appearance: none;
   -webkit-appearance: none;
-  padding: 6px 14px;
-  border-radius: 16px;
-  font-size: 13px;
+  padding: 1px 4px;
+  border-radius: 6px;
+  font-size: 10px;
   font-weight: 500;
-  min-height: 36px;
+  min-height: 12px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
   color: var(--text-dim);
@@ -2771,5 +2771,433 @@ body::after {
   .activity-indicator.thinking,
   .activity-indicator.tool_executing {
     animation: none;
+  }
+}
+
+/* ==================== File Tree Drawer ==================== */
+
+#file-tree-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 320px;
+  max-width: 90vw;
+  height: 100%;
+  background: var(--bg-light);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  border-left: 1px solid var(--border);
+  box-shadow: -5px 0 30px rgba(184, 41, 255, 0.15);
+}
+
+#file-tree-drawer:not(.hidden) {
+  transform: translateX(0);
+}
+
+#file-tree-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(10, 10, 15, 0.8);
+  backdrop-filter: blur(4px);
+  z-index: 150;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+#file-tree-overlay:not(.hidden) {
+  opacity: 1;
+}
+
+.file-tree-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#file-tree-search {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-lighter);
+  color: var(--text);
+  font-size: 14px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+#file-tree-search:focus {
+  outline: none;
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+}
+
+#file-tree-search::placeholder {
+  color: var(--text-dim);
+}
+
+#file-tree-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 0;
+}
+
+#file-tree-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+#file-tree-content::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+#file-tree-content::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--neon-pink), var(--neon-purple));
+  border-radius: 3px;
+}
+
+.file-tree-loading,
+.file-tree-empty,
+.file-tree-error {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+.file-tree-error {
+  color: var(--neon-red);
+}
+
+/* Tree items */
+.tree-folder-header,
+.tree-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+
+.tree-folder-header:hover,
+.tree-file:hover {
+  background: var(--bg-hover);
+}
+
+.tree-file:active,
+.tree-folder-header:active {
+  background: var(--bg-lighter);
+}
+
+.tree-chevron {
+  font-size: 10px;
+  color: var(--text-dim);
+  width: 12px;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.tree-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.tree-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.tree-name {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-folder-children {
+  overflow: hidden;
+}
+
+.tree-folder-children.hidden {
+  display: none;
+}
+
+/* ==================== Full Screen Editor ==================== */
+
+#editor-screen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+}
+
+#editor-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-light);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 20px rgba(255, 45, 149, 0.1);
+  flex-shrink: 0;
+}
+
+#editor-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--neon-pink) 20%,
+    var(--neon-purple) 50%,
+    var(--neon-cyan) 80%,
+    transparent 100%
+  );
+  opacity: 0.6;
+}
+
+#editor-file-path {
+  flex: 1;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 13px;
+  color: var(--neon-cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#editor-status {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.editor-btn {
+  padding: 8px 16px;
+  background: var(--neon-pink);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.1s;
+  flex-shrink: 0;
+}
+
+.editor-btn:hover:not(:disabled) {
+  box-shadow: var(--glow-pink);
+  transform: translateY(-1px);
+}
+
+.editor-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.editor-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--text-dimmer);
+}
+
+#editor-container {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+#editor-gutter {
+  width: 50px;
+  background: var(--bg-lighter);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.line-number {
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-dimmer);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#editor-textarea {
+  flex: 1;
+  padding: 0 16px;
+  background: transparent;
+  border: none;
+  color: transparent;
+  caret-color: var(--neon-cyan);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  resize: none;
+  outline: none;
+  overflow: auto;
+  white-space: pre;
+  tab-size: 2;
+  z-index: 1;
+}
+
+#editor-textarea::selection {
+  background: rgba(0, 240, 255, 0.3);
+}
+
+#editor-display {
+  position: absolute;
+  top: 0;
+  left: 50px;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  padding: 0 16px;
+  background: transparent;
+  overflow: auto;
+  white-space: pre;
+  pointer-events: none;
+}
+
+#editor-code {
+  display: block;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* Neon syntax highlighting for editor */
+#editor-code .token.comment,
+#editor-code .token.prolog,
+#editor-code .token.doctype,
+#editor-code .token.cdata {
+  color: var(--text-dimmer);
+  font-style: italic;
+}
+
+#editor-code .token.punctuation {
+  color: var(--text-dim);
+}
+
+#editor-code .token.property,
+#editor-code .token.tag,
+#editor-code .token.boolean,
+#editor-code .token.number,
+#editor-code .token.constant,
+#editor-code .token.symbol,
+#editor-code .token.deleted {
+  color: var(--neon-orange);
+}
+
+#editor-code .token.selector,
+#editor-code .token.attr-name,
+#editor-code .token.string,
+#editor-code .token.char,
+#editor-code .token.builtin,
+#editor-code .token.inserted {
+  color: var(--neon-green);
+}
+
+#editor-code .token.operator,
+#editor-code .token.entity,
+#editor-code .token.url,
+#editor-code .language-css .token.string,
+#editor-code .style .token.string {
+  color: var(--neon-cyan);
+}
+
+#editor-code .token.atrule,
+#editor-code .token.attr-value,
+#editor-code .token.keyword {
+  color: var(--neon-pink);
+}
+
+#editor-code .token.function,
+#editor-code .token.class-name {
+  color: var(--neon-cyan);
+}
+
+#editor-code .token.regex,
+#editor-code .token.important,
+#editor-code .token.variable {
+  color: var(--neon-purple);
+}
+
+/* Mobile responsive for file tree and editor */
+@media (max-width: 767px) {
+  #file-tree-drawer {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  #editor-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  #editor-file-path {
+    font-size: 12px;
+  }
+
+  #editor-status {
+    display: none;
+  }
+
+  .editor-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  #editor-gutter {
+    width: 40px;
+  }
+
+  .line-number {
+    font-size: 10px;
+    padding: 0 4px;
+  }
+
+  #editor-textarea,
+  #editor-display {
+    font-size: 13px;
+    padding: 0 12px;
+  }
+
+  #editor-display {
+    left: 40px;
+  }
+}
+
+/* Reduced motion for file tree and editor */
+@media (prefers-reduced-motion: reduce) {
+  #file-tree-drawer,
+  #file-tree-overlay,
+  .tree-chevron {
+    transition: none;
   }
 }

@@ -13,6 +13,7 @@ import rateLimit from 'express-rate-limit';
 
 import { authRoutes, authenticateToken, authenticateWebSocket } from './auth.js';
 import { projectRoutes } from './projects.js';
+import { fileRoutes } from './files.js';
 import { handleChat, handleAbort, handleQuestionResponse, handlePlanResponse } from './claude.js';
 import { getAllCommands } from './commands.js';
 import { processUpload, validateFile } from './uploads.js';
@@ -33,10 +34,10 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+      scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
       connectSrc: ["'self'", "ws:", "wss:"],
-      imgSrc: ["'self'", "data:", "blob:"]
+      imgSrc: ["'self'", "data:", "blob:", "https://cdn.jsdelivr.net"]
     }
   }
 }));
@@ -118,6 +119,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', authenticateToken, projectRoutes);
+app.use('/api/files', authenticateToken, fileRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

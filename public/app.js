@@ -3870,4 +3870,470 @@ document.addEventListener('drop', async (e) => {
   }
 });
 
+// ==================== File Tree & Editor Functions ====================
+
+// File editor state
+state.fileEditor = {
+  isOpen: false,
+  editorMode: false,
+  expandedFolders: new Set(JSON.parse(localStorage.getItem('expandedFolders') || '[]')),
+  selectedPath: null,
+  openFiles: [],
+  activeFileIndex: -1,
+  unsavedChanges: new Set(),
+  treeData: null,
+  searchQuery: ''
+};
+
+// DOM references for file editor
+const filesBtn = $('#files-btn');
+const fileTreeDrawer = $('#file-tree-drawer');
+const fileTreeOverlay = $('#file-tree-overlay');
+const fileTreeContent = $('#file-tree-content');
+const fileTreeSearch = $('#file-tree-search');
+const closeFileTreeBtn = $('#close-file-tree');
+const editorScreen = $('#editor-screen');
+const editorHeader = $('#editor-header');
+const editorFilePath = $('#editor-file-path');
+const editorStatus = $('#editor-status');
+const editorSaveBtn = $('#editor-save-btn');
+const editorCloseBtn = $('#editor-close');
+const editorContainer = $('#editor-container');
+const editorGutter = $('#editor-gutter');
+const editorTextarea = $('#editor-textarea');
+const editorDisplay = $('#editor-display');
+const editorCode = $('#editor-code');
+
+// Current file in editor
+let currentEditorFile = null;
+let editorOriginalContent = '';
+let editorLanguage = 'plaintext';
+
+// Open file tree drawer
+async function openFileTree() {
+  const session = getActiveSession();
+  if (!session) return;
+
+  fileTreeDrawer.classList.remove('hidden');
+  fileTreeOverlay.classList.remove('hidden');
+  state.fileEditor.isOpen = true;
+
+  // Load tree if not already loaded
+  if (!state.fileEditor.treeData) {
+    await loadFileTree();
+  }
+}
+
+// Close file tree drawer
+function closeFileTree() {
+  fileTreeDrawer.classList.add('hidden');
+  fileTreeOverlay.classList.add('hidden');
+  state.fileEditor.isOpen = false;
+}
+
+// Load file tree from server
+async function loadFileTree() {
+  const session = getActiveSession();
+  if (!session) return;
+
+  fileTreeContent.innerHTML = '<div class="file-tree-loading">Loading...</div>';
+
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/tree`, {
+      headers: { 'Authorization': `Bearer ${state.token}` }
+    });
+
+    if (!res.ok) {
+      throw new Error('Failed to load file tree');
+    }
+
+    const data = await res.json();
+    state.fileEditor.treeData = data.tree;
+    state.fileEditor.projectPath = data.projectPath;
+
+    renderFileTree();
+  } catch (err) {
+    console.error('[FileTree] Error:', err);
+    fileTreeContent.innerHTML = `<div class="file-tree-error">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// Render file tree
+function renderFileTree() {
+  if (!state.fileEditor.treeData) return;
+
+  const searchQuery = state.fileEditor.searchQuery.toLowerCase();
+  const html = renderTreeLevel(state.fileEditor.treeData, '', 0, searchQuery);
+  fileTreeContent.innerHTML = html || '<div class="file-tree-empty">No files found</div>';
+
+  // Add click handlers
+  fileTreeContent.querySelectorAll('.tree-folder-header').forEach(header => {
+    header.addEventListener('click', () => toggleFolder(header.dataset.path));
+  });
+
+  fileTreeContent.querySelectorAll('.tree-file').forEach(file => {
+    file.addEventListener('click', () => openFile(file.dataset.path));
+  });
+}
+
+// Render a single level of the tree
+function renderTreeLevel(tree, basePath, depth, searchQuery) {
+  const entries = Object.entries(tree)
+    .filter(([name, value]) => {
+      // Filter internal properties
+      if (name === '__isDir' || name === '__isFile') return false;
+
+      // Search filter
+      if (searchQuery) {
+        const fullPath = basePath ? `${basePath}/${name}` : name;
+        const hasMatch = fullPath.toLowerCase().includes(searchQuery) ||
+          hasMatchingChild(value, searchQuery, fullPath);
+        if (!hasMatch) return false;
+      }
+
+      return true;
+    })
+    .map(([name, value]) => {
+      const isDir = value && typeof value === 'object' && value.__isDir;
+      const fullPath = basePath ? `${basePath}/${name}` : name;
+      return { name, isDir, fullPath, value, depth };
+    });
+
+  // Sort: directories first, then alphabetically
+  entries.sort((a, b) => {
+    if (a.isDir && !b.isDir) return -1;
+    if (!a.isDir && b.isDir) return 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
+  return entries.map(entry => {
+    const indent = entry.depth * 16;
+    const icon = getFileTreeIcon(entry.name, entry.isDir);
+
+    if (entry.isDir) {
+      const isExpanded = state.fileEditor.expandedFolders.has(entry.fullPath);
+      const childrenHtml = isExpanded ?
+        renderTreeLevel(entry.value, entry.fullPath, entry.depth + 1, searchQuery) : '';
+
+      return `
+        <div class="tree-folder" data-path="${escapeAttr(entry.fullPath)}">
+          <div class="tree-folder-header" data-path="${escapeAttr(entry.fullPath)}" style="padding-left: ${indent}px">
+            <span class="tree-chevron ${isExpanded ? 'expanded' : ''}">▶</span>
+            <span class="tree-icon">${icon}</span>
+            <span class="tree-name">${escapeHtml(entry.name)}</span>
+          </div>
+          <div class="tree-folder-children ${isExpanded ? '' : 'hidden'}">
+            ${childrenHtml}
+          </div>
+        </div>
+      `;
+    } else {
+      return `
+        <div class="tree-file" data-path="${escapeAttr(entry.fullPath)}" style="padding-left: ${indent + 20}px">
+          <span class="tree-icon">${icon}</span>
+          <span class="tree-name">${escapeHtml(entry.name)}</span>
+        </div>
+      `;
+    }
+  }).join('');
+}
+
+// Check if a folder has matching children
+function hasMatchingChildren(node, searchQuery, currentPath) {
+  if (!node || typeof node !== 'object') return false;
+
+  for (const [name, value] of Object.entries(node)) {
+    if (name === '__isDir' || name === '__isFile') continue;
+
+    const childPath = currentPath ? `${currentPath}/${name}` : name;
+    if (childPath.toLowerCase().includes(searchQuery)) return true;
+
+    if (value && typeof value === 'object' && hasMatchingChildren(value, searchQuery, childPath)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Get icon for file tree item
+function getFileTreeIcon(name, isDir) {
+  if (isDir) return '📁';
+
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  const iconMap = {
+    'js': '📜', 'jsx': '⚛️', 'ts': '📘', 'tsx': '⚛️',
+    'py': '🐍', 'rb': '💎', 'go': '🔵', 'rs': '🦀',
+    'java': '☕', 'c': '⚙️', 'cpp': '⚙️', 'h': '📄',
+    'html': '🌐', 'css': '🎨', 'scss': '🎨', 'less': '🎨',
+    'json': '📋', 'yaml': '📋', 'yml': '📋', 'toml': '📋',
+    'md': '📝', 'markdown': '📝', 'txt': '📄',
+    'svg': '🖼️', 'png': '🖼️', 'jpg': '🖼️', 'gif': '🖼️',
+    'sh': '💻', 'bash': '💻', 'zsh': '💻',
+    'sql': '🗃️', 'graphql': '◉',
+    'gitignore': '🙈', 'env': '🔐',
+    'lock': '🔒', 'sum': '🔒'
+  };
+
+  return iconMap[ext] || '📄';
+}
+
+// Toggle folder expansion
+function toggleFolder(path) {
+  if (state.fileEditor.expandedFolders.has(path)) {
+    state.fileEditor.expandedFolders.delete(path);
+  } else {
+    state.fileEditor.expandedFolders.add(path);
+  }
+
+  // Save to localStorage
+  localStorage.setItem('expandedFolders', JSON.stringify([...state.fileEditor.expandedFolders]));
+
+  renderFileTree();
+}
+
+// Open file in editor
+async function openFile(filePath) {
+  const session = getActiveSession();
+  if (!session) return;
+
+  // Close file tree
+  closeFileTree();
+
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/${encodeURIComponent(filePath)}`, {
+      headers: { 'Authorization': `Bearer ${state.token}` }
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to load file');
+    }
+
+    const data = await res.json();
+
+    if (!data.editable) {
+      alert('This file type cannot be edited in the browser.');
+      return;
+    }
+
+    // Store current file data
+    currentEditorFile = {
+      path: data.path,
+      content: data.content,
+      language: data.language
+    };
+    editorOriginalContent = data.content;
+    editorLanguage = data.language;
+
+    // Update UI
+    editorFilePath.textContent = data.path;
+    editorTextarea.value = data.content;
+    updateEditorHighlighting();
+    updateLineNumbers();
+    updateEditorStatus();
+
+    // Show editor
+    editorScreen.classList.remove('hidden');
+    state.fileEditor.editorMode = true;
+
+    // Focus textarea
+    editorTextarea.focus();
+
+  } catch (err) {
+    console.error('[Editor] Error loading file:', err);
+    alert(`Failed to open file: ${err.message}`);
+  }
+}
+
+// Update syntax highlighting
+function updateEditorHighlighting() {
+  if (typeof Prism === 'undefined') {
+    editorCode.textContent = editorTextarea.value;
+    return;
+  }
+
+  // Get the language for Prism
+  const lang = Prism.languages[editorLanguage] || Prism.languages.plaintext;
+
+  // Highlight the code
+  editorCode.className = `language-${editorLanguage}`;
+  editorCode.innerHTML = Prism.highlight(editorTextarea.value, lang, editorLanguage);
+}
+
+// Update line numbers
+function updateLineNumbers() {
+  const lines = editorTextarea.value.split('\n');
+  const lineCount = lines.length;
+
+  let html = '';
+  for (let i = 1; i <= lineCount; i++) {
+    html += `<div class="line-number">${i}</div>`;
+  }
+  editorGutter.innerHTML = html;
+}
+
+// Update editor status bar
+function updateEditorStatus() {
+  const hasChanges = currentEditorFile && editorTextarea.value !== editorOriginalContent;
+  const lineCount = editorTextarea.value.split('\n').length;
+  const charCount = editorTextarea.value.length;
+
+  if (hasChanges) {
+    editorStatus.textContent = `Modified | ${lineCount} lines | ${charCount} chars`;
+    editorSaveBtn.disabled = false;
+  } else {
+    editorStatus.textContent = `${lineCount} lines | ${charCount} chars`;
+    editorSaveBtn.disabled = true;
+  }
+}
+
+// Save current file
+async function saveCurrentFile() {
+  const session = getActiveSession();
+  if (!session || !currentEditorFile) return;
+
+  const content = editorTextarea.value;
+
+  try {
+    editorSaveBtn.disabled = true;
+    editorSaveBtn.textContent = 'Saving...';
+
+    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/${encodeURIComponent(currentEditorFile.path)}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${state.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ content })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to save file');
+    }
+
+    // Update original content
+    editorOriginalContent = content;
+    currentEditorFile.content = content;
+
+    // Show success
+    editorStatus.textContent = 'Saved!';
+    setTimeout(() => updateEditorStatus(), 2000);
+
+  } catch (err) {
+    console.error('[Editor] Error saving file:', err);
+    alert(`Failed to save file: ${err.message}`);
+    editorSaveBtn.disabled = false;
+  } finally {
+    editorSaveBtn.textContent = 'Save';
+  }
+}
+
+// Close editor
+function closeEditor() {
+  // Check for unsaved changes
+  if (editorTextarea.value !== editorOriginalContent) {
+    if (!confirm('You have unsaved changes. Close anyway?')) {
+      return;
+    }
+  }
+
+  editorScreen.classList.add('hidden');
+  state.fileEditor.editorMode = false;
+  currentEditorFile = null;
+  editorOriginalContent = '';
+}
+
+// Event listeners for file tree
+filesBtn.addEventListener('click', openFileTree);
+closeFileTreeBtn.addEventListener('click', closeFileTree);
+fileTreeOverlay.addEventListener('click', closeFileTree);
+
+// File tree search
+fileTreeSearch.addEventListener('input', (e) => {
+  state.fileEditor.searchQuery = e.target.value;
+  renderFileTree();
+});
+
+// Editor event listeners
+editorCloseBtn.addEventListener('click', closeEditor);
+editorSaveBtn.addEventListener('click', saveCurrentFile);
+
+// Sync textarea and display scrolling
+editorTextarea.addEventListener('scroll', () => {
+  editorDisplay.scrollTop = editorTextarea.scrollTop;
+  editorDisplay.scrollLeft = editorTextarea.scrollLeft;
+  editorGutter.scrollTop = editorTextarea.scrollTop;
+});
+
+// Update highlighting as user types
+editorTextarea.addEventListener('input', () => {
+  updateEditorHighlighting();
+  updateLineNumbers();
+  updateEditorStatus();
+});
+
+// Handle Tab key in editor
+editorTextarea.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = editorTextarea.selectionStart;
+    const end = editorTextarea.selectionEnd;
+
+    // Insert tab character
+    editorTextarea.value = editorTextarea.value.substring(0, start) + '  ' + editorTextarea.value.substring(end);
+
+    // Move cursor
+    editorTextarea.selectionStart = editorTextarea.selectionEnd = start + 2;
+
+    updateEditorHighlighting();
+    updateLineNumbers();
+    updateEditorStatus();
+  }
+
+  // Cmd/Ctrl+S to save
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    e.preventDefault();
+    saveCurrentFile();
+  }
+
+  // Escape to close
+  if (e.key === 'Escape') {
+    closeEditor();
+  }
+});
+
+// Update buttons when session changes
+function updateFilesButtonState() {
+  const session = getActiveSession();
+  filesBtn.disabled = !session;
+}
+
+// Hook into session switching
+const originalSwitchToSession = switchToSession;
+switchToSession = function(index) {
+  originalSwitchToSession(index);
+  updateFilesButtonState();
+
+  // Close file tree when switching sessions
+  if (state.fileEditor.isOpen) {
+    closeFileTree();
+  }
+};
+
+// Hook into session closing
+const originalCloseSession = closeSession;
+closeSession = function(index) {
+  originalCloseSession(index);
+
+  // Clear file tree data if all sessions closed
+  if (state.sessions.length === 0) {
+    state.fileEditor.treeData = null;
+    updateFilesButtonState();
+  }
+};
+
+// ==================== End File Tree & Editor Functions ====================
+
 init();
