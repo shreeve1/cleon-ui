@@ -3881,7 +3881,7 @@ state.fileEditor = {
   openFiles: [],
   activeFileIndex: -1,
   unsavedChanges: new Set(),
-  treeData: null,
+  dirCache: {}, // Cache for lazy-loaded directory contents
   searchQuery: ''
 };
 
@@ -3918,9 +3918,12 @@ async function openFileTree() {
   fileTreeOverlay.classList.remove('hidden');
   state.fileEditor.isOpen = true;
 
-  // Load tree if not already loaded
-  if (!state.fileEditor.treeData) {
+  // Load tree if not already cached
+  if (!state.fileEditor.dirCache['']) {
     await loadFileTree();
+  } else {
+    // Re-render from cache
+    renderFileTree();
   }
 }
 
@@ -3931,7 +3934,7 @@ function closeFileTree() {
   state.fileEditor.isOpen = false;
 }
 
-// Load file tree from server
+// Load file tree from server (lazy loading)
 async function loadFileTree() {
   const session = getActiveSession();
   if (!session) return;
@@ -3939,7 +3942,8 @@ async function loadFileTree() {
   fileTreeContent.innerHTML = '<div class="file-tree-loading">Loading...</div>';
 
   try {
-    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/tree`, {
+    // Load top-level directory only
+    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/ls`, {
       headers: { 'Authorization': `Bearer ${state.token}` }
     });
 
@@ -3948,8 +3952,9 @@ async function loadFileTree() {
     }
 
     const data = await res.json();
-    state.fileEditor.treeData = data.tree;
-    state.fileEditor.projectPath = data.projectPath;
+    // Cache top-level items
+    state.fileEditor.dirCache[''] = data.items;
+    state.fileEditor.projectPath = session.project.name;
 
     renderFileTree();
   } catch (err) {
@@ -3958,17 +3963,56 @@ async function loadFileTree() {
   }
 }
 
-// Render file tree
-function renderFileTree() {
-  if (!state.fileEditor.treeData) return;
+// Load directory contents on demand
+async function loadDirectory(path) {
+  // Return cached if available
+  if (state.fileEditor.dirCache[path]) {
+    return state.fileEditor.dirCache[path];
+  }
 
-  const searchQuery = state.fileEditor.searchQuery.toLowerCase();
-  const html = renderTreeLevel(state.fileEditor.treeData, '', 0, searchQuery);
+  const session = getActiveSession();
+  if (!session) return [];
+
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(session.project.name)}/ls?path=${encodeURIComponent(path)}`, {
+      headers: { 'Authorization': `Bearer ${state.token}` }
+    });
+
+    if (!res.ok) {
+      console.error('[FileTree] Failed to load directory:', path);
+      return [];
+    }
+
+    const data = await res.json();
+    state.fileEditor.dirCache[path] = data.items;
+    return data.items;
+  } catch (err) {
+    console.error('[FileTree] Error loading directory:', err);
+    return [];
+  }
+}
+
+// Render file tree (lazy loading)
+async function renderFileTree() {
+  fileTreeContent.innerHTML = '<div class="file-tree-loading">Loading...</div>';
+
+  const rootItems = await loadDirectory('');
+  const html = renderDirectoryItems(rootItems, '', 0, state.fileEditor.searchQuery.toLowerCase());
   fileTreeContent.innerHTML = html || '<div class="file-tree-empty">No files found</div>';
+
+  // Restore expanded folders
+  fileTreeContent.querySelectorAll('.tree-folder-header').forEach(header => {
+    const path = header.dataset.path;
+    if (state.fileEditor.expandedFolders.has(path)) {
+      // Expand folder and load its contents
+      const childrenDiv = header.nextElementSibling;
+      expandFolder(header, childrenDiv, path);
+    }
+  });
 
   // Add click handlers
   fileTreeContent.querySelectorAll('.tree-folder-header').forEach(header => {
-    header.addEventListener('click', () => toggleFolder(header.dataset.path));
+    header.addEventListener('click', () => toggleFolder(header.dataset.path, header));
   });
 
   fileTreeContent.querySelectorAll('.tree-file').forEach(file => {
@@ -3976,84 +4020,83 @@ function renderFileTree() {
   });
 }
 
-// Render a single level of the tree
-function renderTreeLevel(tree, basePath, depth, searchQuery) {
-  const entries = Object.entries(tree)
-    .filter(([name, value]) => {
-      // Filter internal properties
-      if (name === '__isDir' || name === '__isFile') return false;
-
-      // Search filter
+// Render directory items
+function renderDirectoryItems(items, basePath, depth, searchQuery) {
+  const entries = items
+    .filter(item => {
       if (searchQuery) {
-        const fullPath = basePath ? `${basePath}/${name}` : name;
-        const hasMatch = fullPath.toLowerCase().includes(searchQuery) ||
-          hasMatchingChild(value, searchQuery, fullPath);
-        if (!hasMatch) return false;
+        const fullPath = item.path;
+        return fullPath.toLowerCase().includes(searchQuery);
       }
-
       return true;
     })
-    .map(([name, value]) => {
-      const isDir = value && typeof value === 'object' && value.__isDir;
-      const fullPath = basePath ? `${basePath}/${name}` : name;
-      return { name, isDir, fullPath, value, depth };
-    });
+    .map(item => ({
+      ...item,
+      depth
+    }));
 
   // Sort: directories first, then alphabetically
   entries.sort((a, b) => {
-    if (a.isDir && !b.isDir) return -1;
-    if (!a.isDir && b.isDir) return 1;
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
     return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
   });
 
   return entries.map(entry => {
     const indent = entry.depth * 16;
-    const icon = getFileTreeIcon(entry.name, entry.isDir);
+    const icon = getFileTreeIcon(entry.name, entry.isDirectory);
 
-    if (entry.isDir) {
-      const isExpanded = state.fileEditor.expandedFolders.has(entry.fullPath);
-      const childrenHtml = isExpanded ?
-        renderTreeLevel(entry.value, entry.fullPath, entry.depth + 1, searchQuery) : '';
-
+    if (entry.isDirectory) {
       return `
-        <div class="tree-folder" data-path="${escapeAttr(entry.fullPath)}">
-          <div class="tree-folder-header" data-path="${escapeAttr(entry.fullPath)}" style="padding-left: ${indent}px">
-            <span class="tree-chevron ${isExpanded ? 'expanded' : ''}">▶</span>
+        <div class="tree-folder">
+          <div class="tree-folder-header" data-path="${escapeAttr(entry.path)}" style="padding-left: ${indent}px">
+            <span class="tree-chevron">▶</span>
             <span class="tree-icon">${icon}</span>
             <span class="tree-name">${escapeHtml(entry.name)}</span>
           </div>
-          <div class="tree-folder-children ${isExpanded ? '' : 'hidden'}">
-            ${childrenHtml}
-          </div>
-        </div>
-      `;
+          <div class="tree-folder-children hidden"></div>
+        </div>`;
     } else {
       return `
-        <div class="tree-file" data-path="${escapeAttr(entry.fullPath)}" style="padding-left: ${indent + 20}px">
+        <div class="tree-file" data-path="${escapeAttr(entry.path)}" style="padding-left: ${indent}px">
           <span class="tree-icon">${icon}</span>
           <span class="tree-name">${escapeHtml(entry.name)}</span>
-        </div>
-      `;
+        </div>`;
     }
   }).join('');
 }
 
-// Check if a folder has matching children
-function hasMatchingChildren(node, searchQuery, currentPath) {
-  if (!node || typeof node !== 'object') return false;
+// Expand a folder and load its contents
+async function expandFolder(header, childrenDiv, path) {
+  header.classList.add('expanded');
+  const chevron = header.querySelector('.tree-chevron');
+  if (chevron) chevron.textContent = '▼';
 
-  for (const [name, value] of Object.entries(node)) {
-    if (name === '__isDir' || name === '__isFile') continue;
+  // Load directory contents
+  const items = await loadDirectory(path);
 
-    const childPath = currentPath ? `${currentPath}/${name}` : name;
-    if (childPath.toLowerCase().includes(searchQuery)) return true;
+  if (items.length === 0) {
+    childrenDiv.innerHTML = '<div class="tree-folder-empty">Empty folder</div>';
+  } else {
+    childrenDiv.innerHTML = renderDirectoryItems(items, path, 0, state.fileEditor.searchQuery.toLowerCase());
+    childrenDiv.classList.remove('hidden');
 
-    if (value && typeof value === 'object' && hasMatchingChildren(value, searchQuery, childPath)) {
-      return true;
-    }
+    // Recursively expand nested folders if they were saved
+    childrenDiv.querySelectorAll('.tree-folder-header').forEach(childHeader => {
+      const childPath = childHeader.dataset.path;
+      if (state.fileEditor.expandedFolders.has(childPath)) {
+        const childChildrenDiv = childHeader.nextElementSibling;
+        expandFolder(childHeader, childChildrenDiv, childPath);
+      } else {
+        childHeader.addEventListener('click', () => toggleFolder(childHeader.dataset.path, childHeader));
+      }
+    });
+
+    childrenDiv.querySelectorAll('.tree-file').forEach(file => {
+      file.addEventListener('click', () => openFile(file.dataset.path));
+    });
   }
-
-  return false;
 }
 
 // Get icon for file tree item
@@ -4078,18 +4121,31 @@ function getFileTreeIcon(name, isDir) {
   return iconMap[ext] || '📄';
 }
 
-// Toggle folder expansion
-function toggleFolder(path) {
+// Toggle folder expansion (lazy loading)
+async function toggleFolder(path, header = null) {
+  // Find header if not provided
+  if (!header) {
+    header = document.querySelector(`.tree-folder-header[data-path="${escapeAttr(path)}"]`);
+    if (!header) return;
+  }
+
+  const childrenDiv = header.nextElementSibling;
+
   if (state.fileEditor.expandedFolders.has(path)) {
+    // Collapse
     state.fileEditor.expandedFolders.delete(path);
+    header.classList.remove('expanded');
+    const chevron = header.querySelector('.tree-chevron');
+    if (chevron) chevron.textContent = '▶';
+    childrenDiv.classList.add('hidden');
   } else {
+    // Expand
     state.fileEditor.expandedFolders.add(path);
+    await expandFolder(header, childrenDiv, path);
   }
 
   // Save to localStorage
   localStorage.setItem('expandedFolders', JSON.stringify([...state.fileEditor.expandedFolders]));
-
-  renderFileTree();
 }
 
 // Open file in editor
@@ -4327,9 +4383,9 @@ const originalCloseSession = closeSession;
 closeSession = function(index) {
   originalCloseSession(index);
 
-  // Clear file tree data if all sessions closed
+  // Clear file tree cache if all sessions closed
   if (state.sessions.length === 0) {
-    state.fileEditor.treeData = null;
+    state.fileEditor.dirCache = {};
     updateFilesButtonState();
   }
 };

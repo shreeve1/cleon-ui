@@ -2878,6 +2878,13 @@ body::after {
   color: var(--neon-red);
 }
 
+.tree-folder-empty {
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+
 /* Tree items */
 .tree-folder-header,
 .tree-file {
@@ -3056,13 +3063,15 @@ body::after {
   caret-color: var(--neon-cyan);
   font-family: inherit;
   font-size: inherit;
-  line-height: inherit;
+  line-height: 1.6;
   resize: none;
   outline: none;
   overflow: auto;
   white-space: pre;
   tab-size: 2;
   z-index: 1;
+  /* Force consistent line-height and baseline */
+  box-sizing: border-box;
 }
 
 #editor-textarea::selection {
@@ -3081,6 +3090,10 @@ body::after {
   overflow: auto;
   white-space: pre;
   pointer-events: none;
+  line-height: 1.6;
+  /* Force consistent line-height and baseline */
+  box-sizing: border-box;
+  display: block;
 }
 
 #editor-code {
@@ -3088,7 +3101,9 @@ body::after {
   background: transparent;
   font-family: inherit;
   font-size: inherit;
-  line-height: inherit;
+  line-height: 1.6;
+  /* Ensure consistent text rendering with textarea */
+  box-sizing: border-box;
 }
 
 /* Neon syntax highlighting for editor */
