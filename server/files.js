@@ -348,27 +348,61 @@ router.get('/:project/ls', async (req, res) => {
       return res.status(404).json({ error: 'Directory not found' });
     }
 
-    // List directory contents directly using fs.readdir
-    const entries = await fs.readdir(targetPath, { withFileTypes: true });
+    // List directory contents using glob to include hidden files
+    const pattern = dirPath ? path.join(dirPath, '*') : '*';
+    const files = await glob(pattern, {
+      cwd: actualPath,
+      absolute: false,
+      nodir: false,
+      dot: true, // Include hidden files
+      ignore: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/.DS_Store',
+        '**/dist/**',
+        '**/build/**',
+        '**/.next/**',
+        '**/coverage/**',
+        '**/__pycache__/**',
+        '**/.pytest_cache/**',
+        '**/vendor/**',
+        '**/.venv/**',
+        '**/venv/**',
+        '**/.env.local',
+        '**/.env.*.local',
+        // System directories to skip
+        '**/Library/**',
+        '**/Applications/**',
+        '**/Desktop/**',
+        '**/Documents/**',
+        '**/Downloads/**',
+        '**/Movies/**',
+        '**/Music/**',
+        '**/Pictures/**',
+        '**/.Trash/**',
+        '**/.localized/**',
+        '**/System/**',
+        '**/bin/**',
+        '**/etc/**',
+        '**/usr/**',
+        '**/tmp/**',
+        '**/var/**'
+      ]
+    });
 
-    // Filter and format entries
     const ignorePatterns = [
-      'node_modules', '.git', '.DS_Store', 'dist', 'build', '.next',
-      'coverage', '__pycache__', '.pytest_cache', 'vendor', '.venv', 'venv',
-      'Library', 'Applications', 'Desktop', 'Documents', 'Downloads',
-      'Movies', 'Music', 'Pictures', '.Trash', '.localized',
-      'System', 'bin', 'etc', 'usr', 'tmp', 'var'
+      '.env.local',
+      '.env.*.local'
     ];
 
+    // Get file stats to determine directories
     const items = [];
-    for (const entry of entries) {
-      const name = entry.name;
+    for (const name of files) {
+      // Skip remaining ignored patterns
+      if (ignorePatterns.some(p => name.includes(p))) continue;
 
-      // Skip ignored directories/files
-      if (ignorePatterns.includes(name)) continue;
-      if (name.startsWith('.env') && name !== '.env') continue;
-
-      const isDir = entry.isDirectory();
+      const filePath = path.join(actualPath, name);
+      const isDir = (await fs.stat(filePath)).isDirectory();
 
       items.push({
         name,

@@ -127,10 +127,9 @@
         </div>
         <div id="skills-bar">
           <button class="skill-btn" data-command="/question" data-color="red">question</button>
+          <button class="skill-btn" data-command="/dev-investigate" data-color="cyan">dev-investigate</button>
           <button class="skill-btn" data-command="/brainstorm" data-color="purple">brainstorm</button>
-          <button class="skill-btn" data-command="/brainstorm-idea" data-color="cyan">brainstorm-idea</button>
-          <button class="skill-btn" data-command="/brainstorm-code" data-color="orange">brainstorm-code</button>
-          <button class="skill-btn" data-command="/plan" data-color="green">plan</button>
+          <button class="skill-btn" data-command="/dev-plan" data-color="green">dev-plan</button>
           <button class="skill-btn" data-command="/validate" data-color="blue">validate</button>
           <button class="skill-btn" data-command="/build" data-color="red">build</button>
           <button class="skill-btn" data-command="/test" data-color="purple">test</button>
@@ -192,8 +191,7 @@
         </div>
         <div id="editor-container">
           <div id="editor-gutter"></div>
-          <textarea id="editor-textarea" spellcheck="false"></textarea>
-          <pre id="editor-display"><code id="editor-code"></code></pre>
+          <div id="editor" class="monaco-editor-container"></div>
         </div>
       </div>
     </div>
@@ -212,6 +210,7 @@
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-json.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-css.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29/components/prism-typescript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

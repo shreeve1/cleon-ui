@@ -3900,14 +3900,106 @@ const editorSaveBtn = $('#editor-save-btn');
 const editorCloseBtn = $('#editor-close');
 const editorContainer = $('#editor-container');
 const editorGutter = $('#editor-gutter');
-const editorTextarea = $('#editor-textarea');
-const editorDisplay = $('#editor-display');
-const editorCode = $('#editor-code');
+
+// Monaco Editor instance
+let monacoEditor = null;
 
 // Current file in editor
 let currentEditorFile = null;
 let editorOriginalContent = '';
 let editorLanguage = 'plaintext';
+
+// Map file extensions to Monaco languages
+const monacoLanguageMap = {
+  'js': 'javascript',
+  'ts': 'typescript',
+  'html': 'html',
+  'css': 'css',
+  'json': 'json',
+  'md': 'markdown',
+  'py': 'python',
+  'rb': 'ruby',
+  'sh': 'shell',
+  'bash': 'shell',
+  'yaml': 'yaml',
+  'yml': 'yaml',
+  'xml': 'xml',
+  'sql': 'sql',
+  'go': 'go',
+  'rs': 'rust',
+  'java': 'java',
+  'c': 'c',
+  'cpp': 'cpp',
+  'h': 'c',
+  'hpp': 'cpp',
+  'php': 'php',
+  'vue': 'vue',
+  'svelte': 'svelte'
+};
+
+// Initialize Monaco Editor
+function initMonacoEditor() {
+  if (monacoEditor) {
+    return monacoEditor;
+  }
+
+  const editorElement = $('#editor');
+  if (!editorElement) {
+    console.error('[Monaco] Editor element not found');
+    return null;
+  }
+
+  // Require Monaco from the loader
+  require.config({
+    paths: {
+      'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs'
+    }
+  });
+
+  return new Promise((resolve, reject) => {
+    require(['vs/editor/editor.main'], function() {
+      monacoEditor = monaco.editor.create(editorElement, {
+        value: '',
+        language: 'plaintext',
+        theme: 'vs-dark',
+        automaticLayout: true,
+        fontSize: 14,
+        fontFamily: "'SF Mono', Monaco, 'Cascadia Code', 'Consolas', monospace",
+        minimap: { enabled: false },
+        lineNumbers: 'on',
+        glyphMargin: false,
+        folding: true,
+        lineDecorationsWidth: 10,
+        lineNumbersMinChars: 4,
+        padding: { top: 0, bottom: 0 },
+        scrollBeyondLastLine: false,
+        renderLineHighlight: 'line',
+        cursorBlinking: 'smooth',
+        cursorSmoothCaretAnimation: 'on',
+        smoothScrolling: true,
+        tabSize: 2,
+        wordWrap: 'on'
+      });
+
+      // Track content changes for status updates
+      monacoEditor.onDidChangeModelContent(() => {
+        updateEditorStatus();
+      });
+
+      // Add keyboard shortcuts
+      monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        saveCurrentFile();
+      });
+
+      monacoEditor.addCommand(monaco.KeyCode.Escape, () => {
+        closeEditor();
+      });
+
+      console.log('[Monaco] Editor initialized');
+      resolve(monacoEditor);
+    });
+  });
+}
 
 // Open file tree drawer
 async function openFileTree() {
@@ -4173,6 +4265,16 @@ async function openFile(filePath) {
       return;
     }
 
+    // Initialize Monaco if needed
+    if (!monacoEditor) {
+      await initMonacoEditor();
+    }
+
+    if (!monacoEditor) {
+      alert('Failed to initialize editor');
+      return;
+    }
+
     // Store current file data
     currentEditorFile = {
       path: data.path,
@@ -4180,21 +4282,26 @@ async function openFile(filePath) {
       language: data.language
     };
     editorOriginalContent = data.content;
-    editorLanguage = data.language;
+
+    // Detect language from file extension
+    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+    editorLanguage = monacoLanguageMap[ext] || data.language || 'plaintext';
 
     // Update UI
     editorFilePath.textContent = data.path;
-    editorTextarea.value = data.content;
-    updateEditorHighlighting();
-    updateLineNumbers();
+
+    // Set content and language in Monaco
+    monacoEditor.setValue(data.content);
+    monaco.editor.setModelLanguage(monacoEditor.getModel(), editorLanguage);
+
     updateEditorStatus();
 
     // Show editor
     editorScreen.classList.remove('hidden');
     state.fileEditor.editorMode = true;
 
-    // Focus textarea
-    editorTextarea.focus();
+    // Focus editor
+    monacoEditor.focus();
 
   } catch (err) {
     console.error('[Editor] Error loading file:', err);
@@ -4202,38 +4309,14 @@ async function openFile(filePath) {
   }
 }
 
-// Update syntax highlighting
-function updateEditorHighlighting() {
-  if (typeof Prism === 'undefined') {
-    editorCode.textContent = editorTextarea.value;
-    return;
-  }
-
-  // Get the language for Prism
-  const lang = Prism.languages[editorLanguage] || Prism.languages.plaintext;
-
-  // Highlight the code
-  editorCode.className = `language-${editorLanguage}`;
-  editorCode.innerHTML = Prism.highlight(editorTextarea.value, lang, editorLanguage);
-}
-
-// Update line numbers
-function updateLineNumbers() {
-  const lines = editorTextarea.value.split('\n');
-  const lineCount = lines.length;
-
-  let html = '';
-  for (let i = 1; i <= lineCount; i++) {
-    html += `<div class="line-number">${i}</div>`;
-  }
-  editorGutter.innerHTML = html;
-}
-
 // Update editor status bar
 function updateEditorStatus() {
-  const hasChanges = currentEditorFile && editorTextarea.value !== editorOriginalContent;
-  const lineCount = editorTextarea.value.split('\n').length;
-  const charCount = editorTextarea.value.length;
+  if (!monacoEditor) return;
+
+  const content = monacoEditor.getValue();
+  const hasChanges = currentEditorFile && content !== editorOriginalContent;
+  const lineCount = monacoEditor.getModel()?.getLineCount() || content.split('\n').length;
+  const charCount = content.length;
 
   if (hasChanges) {
     editorStatus.textContent = `Modified | ${lineCount} lines | ${charCount} chars`;
@@ -4247,9 +4330,9 @@ function updateEditorStatus() {
 // Save current file
 async function saveCurrentFile() {
   const session = getActiveSession();
-  if (!session || !currentEditorFile) return;
+  if (!session || !currentEditorFile || !monacoEditor) return;
 
-  const content = editorTextarea.value;
+  const content = monacoEditor.getValue();
 
   try {
     editorSaveBtn.disabled = true;
@@ -4288,12 +4371,18 @@ async function saveCurrentFile() {
 
 // Close editor
 function closeEditor() {
+  if (!monacoEditor) return;
+
   // Check for unsaved changes
-  if (editorTextarea.value !== editorOriginalContent) {
+  const content = monacoEditor.getValue();
+  if (content !== editorOriginalContent) {
     if (!confirm('You have unsaved changes. Close anyway?')) {
       return;
     }
   }
+
+  // Clear editor content
+  monacoEditor.setValue('');
 
   editorScreen.classList.add('hidden');
   state.fileEditor.editorMode = false;
@@ -4315,50 +4404,6 @@ fileTreeSearch.addEventListener('input', (e) => {
 // Editor event listeners
 editorCloseBtn.addEventListener('click', closeEditor);
 editorSaveBtn.addEventListener('click', saveCurrentFile);
-
-// Sync textarea and display scrolling
-editorTextarea.addEventListener('scroll', () => {
-  editorDisplay.scrollTop = editorTextarea.scrollTop;
-  editorDisplay.scrollLeft = editorTextarea.scrollLeft;
-  editorGutter.scrollTop = editorTextarea.scrollTop;
-});
-
-// Update highlighting as user types
-editorTextarea.addEventListener('input', () => {
-  updateEditorHighlighting();
-  updateLineNumbers();
-  updateEditorStatus();
-});
-
-// Handle Tab key in editor
-editorTextarea.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const start = editorTextarea.selectionStart;
-    const end = editorTextarea.selectionEnd;
-
-    // Insert tab character
-    editorTextarea.value = editorTextarea.value.substring(0, start) + '  ' + editorTextarea.value.substring(end);
-
-    // Move cursor
-    editorTextarea.selectionStart = editorTextarea.selectionEnd = start + 2;
-
-    updateEditorHighlighting();
-    updateLineNumbers();
-    updateEditorStatus();
-  }
-
-  // Cmd/Ctrl+S to save
-  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-    e.preventDefault();
-    saveCurrentFile();
-  }
-
-  // Escape to close
-  if (e.key === 'Escape') {
-    closeEditor();
-  }
-});
 
 // Update buttons when session changes
 function updateFilesButtonState() {

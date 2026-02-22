@@ -3044,123 +3044,23 @@ body::after {
   overflow: hidden;
   flex-shrink: 0;
   user-select: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
 }
 
-.line-number {
-  padding: 0 8px;
-  text-align: right;
-  color: var(--text-dimmer);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-#editor-textarea {
+/* Monaco Editor Container */
+.monaco-editor-container {
   flex: 1;
-  padding: 0 16px;
-  background: transparent;
-  border: none;
-  color: transparent;
-  caret-color: var(--neon-cyan);
-  font-family: inherit;
-  font-size: inherit;
-  line-height: 1.6;
-  resize: none;
-  outline: none;
-  overflow: auto;
-  white-space: pre;
-  tab-size: 2;
-  z-index: 1;
-  /* Force consistent line-height and baseline */
-  box-sizing: border-box;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
-#editor-textarea::selection {
-  background: rgba(0, 240, 255, 0.3);
-}
-
-#editor-display {
-  position: absolute;
-  top: 0;
-  left: 50px;
-  right: 0;
-  bottom: 0;
-  margin: 0;
-  padding: 0 16px;
-  background: transparent;
-  overflow: auto;
-  white-space: pre;
-  pointer-events: none;
-  line-height: 1.6;
-  /* Force consistent line-height and baseline */
-  box-sizing: border-box;
-  display: block;
-}
-
-#editor-code {
-  display: block;
-  background: transparent;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: 1.6;
-  /* Ensure consistent text rendering with textarea */
-  box-sizing: border-box;
-}
-
-/* Neon syntax highlighting for editor */
-#editor-code .token.comment,
-#editor-code .token.prolog,
-#editor-code .token.doctype,
-#editor-code .token.cdata {
-  color: var(--text-dimmer);
-  font-style: italic;
-}
-
-#editor-code .token.punctuation {
-  color: var(--text-dim);
-}
-
-#editor-code .token.property,
-#editor-code .token.tag,
-#editor-code .token.boolean,
-#editor-code .token.number,
-#editor-code .token.constant,
-#editor-code .token.symbol,
-#editor-code .token.deleted {
-  color: var(--neon-orange);
-}
-
-#editor-code .token.selector,
-#editor-code .token.attr-name,
-#editor-code .token.string,
-#editor-code .token.char,
-#editor-code .token.builtin,
-#editor-code .token.inserted {
-  color: var(--neon-green);
-}
-
-#editor-code .token.operator,
-#editor-code .token.entity,
-#editor-code .token.url,
-#editor-code .language-css .token.string,
-#editor-code .style .token.string {
-  color: var(--neon-cyan);
-}
-
-#editor-code .token.atrule,
-#editor-code .token.attr-value,
-#editor-code .token.keyword {
-  color: var(--neon-pink);
-}
-
-#editor-code .token.function,
-#editor-code .token.class-name {
-  color: var(--neon-cyan);
-}
-
-#editor-code .token.regex,
-#editor-code .token.important,
-#editor-code .token.variable {
-  color: var(--neon-purple);
+#editor {
+  width: 100%;
+  height: 100%;
 }
 
 /* Mobile responsive for file tree and editor */
@@ -3190,21 +3090,6 @@ body::after {
 
   #editor-gutter {
     width: 40px;
-  }
-
-  .line-number {
-    font-size: 10px;
-    padding: 0 4px;
-  }
-
-  #editor-textarea,
-  #editor-display {
-    font-size: 13px;
-    padding: 0 12px;
-  }
-
-  #editor-display {
-    left: 40px;
   }
 }
 
