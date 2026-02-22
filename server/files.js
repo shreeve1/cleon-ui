@@ -10,7 +10,7 @@ const router = express.Router();
 // Use the same project directory as projects.js
 const CLAUDE_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
 
-const MAX_TREE_FILES = 500;
+const MAX_TREE_FILES = 500; // Back to reasonable limit - will use lazy loading instead
 
 /**
  * Extract actual project path from session files (cwd field)
@@ -266,11 +266,12 @@ router.get('/:project/tree', async (req, res) => {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    // Build file list with glob
+    // Build file list with glob (include hidden files)
     const files = await glob('**/*', {
       cwd: actualPath,
       absolute: false,
       nodir: false,
+      dot: true, // Include hidden files
       ignore: [
         '**/node_modules/**',
         '**/.git/**',
@@ -320,6 +321,74 @@ router.get('/:project/tree', async (req, res) => {
     res.json({ tree, projectPath: project });
   } catch (err) {
     logger.error('Error generating file tree', { error: err.message, project });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * List directory contents (for lazy loading)
+ */
+router.get('/:project/ls', async (req, res) => {
+  const { project } = req.params;
+  const dirPath = req.query.path || '';
+
+  try {
+    // Get the actual project path
+    const projectDir = path.join(CLAUDE_PROJECTS, project);
+    const actualPath = await extractProjectPath(projectDir, project);
+    const targetPath = dirPath ? path.join(actualPath, dirPath) : actualPath;
+
+    // Verify path exists
+    try {
+      const stats = await fs.stat(targetPath);
+      if (!stats.isDirectory()) {
+        return res.status(400).json({ error: 'Not a directory' });
+      }
+    } catch (err) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+
+    // List directory contents directly using fs.readdir
+    const entries = await fs.readdir(targetPath, { withFileTypes: true });
+
+    // Filter and format entries
+    const ignorePatterns = [
+      'node_modules', '.git', '.DS_Store', 'dist', 'build', '.next',
+      'coverage', '__pycache__', '.pytest_cache', 'vendor', '.venv', 'venv',
+      'Library', 'Applications', 'Desktop', 'Documents', 'Downloads',
+      'Movies', 'Music', 'Pictures', '.Trash', '.localized',
+      'System', 'bin', 'etc', 'usr', 'tmp', 'var'
+    ];
+
+    const items = [];
+    for (const entry of entries) {
+      const name = entry.name;
+
+      // Skip ignored directories/files
+      if (ignorePatterns.includes(name)) continue;
+      if (name.startsWith('.env') && name !== '.env') continue;
+
+      const isDir = entry.isDirectory();
+
+      items.push({
+        name,
+        path: dirPath ? `${dirPath}/${name}` : name,
+        isDirectory: isDir
+      });
+    }
+
+    // Sort: directories first, then alphabetically
+    items.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) {
+        return a.isDirectory ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+
+    logger.info('Directory listed', { project, path: dirPath || '/', count: items.length });
+    res.json({ items, path: dirPath || '/' });
+  } catch (err) {
+    logger.error('Error listing directory', { error: err.message, project, path: dirPath });
     res.status(500).json({ error: err.message });
   }
 });
