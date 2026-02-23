@@ -349,9 +349,10 @@ router.get('/:project/ls', async (req, res) => {
     }
 
     // List directory contents using glob to include hidden files
-    const pattern = dirPath ? path.join(dirPath, '*') : '*';
+    // Use targetPath as cwd for subdirectories to ensure proper relative paths
+    const pattern = '{*,.*}';
     const files = await glob(pattern, {
-      cwd: actualPath,
+      cwd: targetPath,
       absolute: false,
       nodir: false,
       dot: true, // Include hidden files
@@ -401,7 +402,7 @@ router.get('/:project/ls', async (req, res) => {
       // Skip remaining ignored patterns
       if (ignorePatterns.some(p => name.includes(p))) continue;
 
-      const filePath = path.join(actualPath, name);
+      const filePath = path.join(targetPath, name);
       const isDir = (await fs.stat(filePath)).isDirectory();
 
       items.push({

@@ -652,7 +652,6 @@ const newSessionTabBtn = $('#new-session-tab-btn');
 const abortBtn = $('#abort-btn');
 const projectNameEl = $('#project-name');
 const tokenUsageEl = $('#token-usage');
-const skillsBarEl = $('#skills-bar');
 const slashCommandsEl = $('#slash-commands');
 const fileMentionsEl = $('#file-mentions');
 const attachmentPreviewEl = $('#attachment-preview');
@@ -2521,6 +2520,37 @@ if (window.visualViewport) {
   });
 }
 
+// Mobile keyboard handling for Monaco Editor
+function handleEditorViewportResize() {
+  if (!window.visualViewport) return;
+  if (!editorScreen || editorScreen.classList.contains('hidden')) return;
+
+  const vv = window.visualViewport;
+  editorScreen.style.top = `${vv.offsetTop}px`;
+  editorScreen.style.height = `${vv.height}px`;
+  editorScreen.style.bottom = 'auto';
+
+  // Tell Monaco to recalculate its layout dimensions
+  if (monacoEditor) {
+    monacoEditor.layout();
+  }
+}
+
+function resetEditorViewport() {
+  if (!editorScreen) return;
+  editorScreen.style.top = '';
+  editorScreen.style.height = '';
+  editorScreen.style.bottom = '';
+  if (monacoEditor) {
+    monacoEditor.layout();
+  }
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', handleEditorViewportResize);
+  window.visualViewport.addEventListener('scroll', handleEditorViewportResize);
+}
+
 function calculateCommandScore(cmd, query) {
   const nameLower = cmd.name.toLowerCase();
 
@@ -2586,14 +2616,6 @@ function renderSlashCommands(commands) {
     `;
   }).join('');
 }
-
-// Skills bar - quick-access slash command buttons
-skillsBarEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('.skill-btn');
-  if (btn) {
-    insertSlashCommand(btn.dataset.command);
-  }
-});
 
 // Event delegation for slash commands (avoids memory leaks)
 slashCommandsEl.addEventListener('click', (e) => {
@@ -4171,7 +4193,9 @@ async function expandFolder(header, childrenDiv, path) {
   if (items.length === 0) {
     childrenDiv.innerHTML = '<div class="tree-folder-empty">Empty folder</div>';
   } else {
-    childrenDiv.innerHTML = renderDirectoryItems(items, path, 0, state.fileEditor.searchQuery.toLowerCase());
+    // Calculate depth from path (number of path separators)
+    const depth = path ? path.split('/').filter(Boolean).length : 0;
+    childrenDiv.innerHTML = renderDirectoryItems(items, path, depth + 1, state.fileEditor.searchQuery.toLowerCase());
     childrenDiv.classList.remove('hidden');
 
     // Recursively expand nested folders if they were saved
@@ -4388,6 +4412,9 @@ function closeEditor() {
   state.fileEditor.editorMode = false;
   currentEditorFile = null;
   editorOriginalContent = '';
+
+  // Reset any mobile viewport adjustments
+  resetEditorViewport();
 }
 
 // Event listeners for file tree
@@ -4416,6 +4443,9 @@ const originalSwitchToSession = switchToSession;
 switchToSession = function(index) {
   originalSwitchToSession(index);
   updateFilesButtonState();
+
+  // Clear file tree cache when switching sessions to ensure correct project files
+  state.fileEditor.dirCache = {};
 
   // Close file tree when switching sessions
   if (state.fileEditor.isOpen) {

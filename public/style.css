@@ -1571,129 +1571,6 @@ body::after {
   text-shadow: none;
 }
 
-/* Skills Bar */
-#skills-bar {
-  display: flex;
-  gap: 6px;
-  padding: 8px 16px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  background: var(--bg-light);
-  border-top: 1px solid var(--border);
-  -webkit-mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
-  mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
-}
-
-#skills-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.skill-btn {
-  appearance: none;
-  -webkit-appearance: none;
-  padding: 1px 4px;
-  border-radius: 6px;
-  font-size: 10px;
-  font-weight: 500;
-  min-height: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-family: monospace;
-  white-space: nowrap;
-  cursor: pointer;
-  outline: none;
-  transition: all 0.15s ease;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.skill-btn::before {
-  content: '/';
-  color: var(--text-dimmer);
-  font-weight: 400;
-  margin-right: 1px;
-}
-
-.skill-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--text-dim);
-  color: var(--text);
-}
-
-.skill-btn:active {
-  transform: scale(0.95);
-}
-
-.skill-btn:focus-visible {
-  border-color: var(--neon-cyan);
-  box-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
-}
-
-/* Per-button color theming */
-.skill-btn[data-color="purple"] { border-color: rgba(184, 41, 255, 0.25); }
-.skill-btn[data-color="purple"]:hover {
-  color: var(--neon-purple);
-  border-color: var(--neon-purple);
-  background: rgba(184, 41, 255, 0.1);
-  box-shadow: 0 0 12px rgba(184, 41, 255, 0.3);
-}
-.skill-btn[data-color="purple"]:hover::before { color: var(--neon-purple); }
-
-.skill-btn[data-color="cyan"] { border-color: rgba(0, 240, 255, 0.25); }
-.skill-btn[data-color="cyan"]:hover {
-  color: var(--neon-cyan);
-  border-color: var(--neon-cyan);
-  background: rgba(0, 240, 255, 0.1);
-  box-shadow: 0 0 12px rgba(0, 240, 255, 0.3);
-}
-.skill-btn[data-color="cyan"]:hover::before { color: var(--neon-cyan); }
-
-.skill-btn[data-color="orange"] { border-color: rgba(255, 107, 26, 0.25); }
-.skill-btn[data-color="orange"]:hover {
-  color: var(--neon-orange);
-  border-color: var(--neon-orange);
-  background: rgba(255, 107, 26, 0.1);
-  box-shadow: 0 0 12px rgba(255, 107, 26, 0.3);
-}
-.skill-btn[data-color="orange"]:hover::before { color: var(--neon-orange); }
-
-.skill-btn[data-color="green"] { border-color: rgba(57, 255, 20, 0.25); }
-.skill-btn[data-color="green"]:hover {
-  color: var(--neon-green);
-  border-color: var(--neon-green);
-  background: rgba(57, 255, 20, 0.1);
-  box-shadow: 0 0 12px rgba(57, 255, 20, 0.3);
-}
-.skill-btn[data-color="green"]:hover::before { color: var(--neon-green); }
-
-.skill-btn[data-color="blue"] { border-color: rgba(0, 168, 255, 0.25); }
-.skill-btn[data-color="blue"]:hover {
-  color: var(--neon-blue);
-  border-color: var(--neon-blue);
-  background: rgba(0, 168, 255, 0.1);
-  box-shadow: 0 0 12px rgba(0, 168, 255, 0.3);
-}
-.skill-btn[data-color="blue"]:hover::before { color: var(--neon-blue); }
-
-.skill-btn[data-color="red"] { border-color: rgba(255, 23, 68, 0.25); }
-.skill-btn[data-color="red"]:hover {
-  color: var(--neon-red);
-  border-color: var(--neon-red);
-  background: rgba(255, 23, 68, 0.1);
-  box-shadow: 0 0 12px rgba(255, 23, 68, 0.3);
-}
-.skill-btn[data-color="red"]:hover::before { color: var(--neon-red); }
-
-/* Per-button active/press glow */
-.skill-btn[data-color="purple"]:active { box-shadow: 0 0 18px rgba(184, 41, 255, 0.5); }
-.skill-btn[data-color="cyan"]:active { box-shadow: 0 0 18px rgba(0, 240, 255, 0.5); }
-.skill-btn[data-color="orange"]:active { box-shadow: 0 0 18px rgba(255, 107, 26, 0.5); }
-.skill-btn[data-color="green"]:active { box-shadow: 0 0 18px rgba(57, 255, 20, 0.5); }
-.skill-btn[data-color="blue"]:active { box-shadow: 0 0 18px rgba(0, 168, 255, 0.5); }
-.skill-btn[data-color="red"]:active { box-shadow: 0 0 18px rgba(255, 23, 68, 0.5); }
-
 /* Chat Form */
 #chat-form {
   display: flex;
@@ -2162,15 +2039,6 @@ body::after {
 
   .session-tab.show-close .close-tab:active {
     background: rgba(255, 0, 60, 0.15);
-  }
-
-  #skills-bar {
-    padding: 8px 12px;
-  }
-  .skill-btn {
-    min-height: 44px;
-    padding: 8px 16px;
-    font-size: 13px;
   }
 }
 
@@ -2757,14 +2625,6 @@ body::after {
   }
   .file-link:hover {
     border-bottom-style: solid;
-  }
-
-  /* Disable skill button animations */
-  .skill-btn {
-    transition: none;
-  }
-  .skill-btn:active {
-    transform: none;
   }
 
   /* Disable activity indicator animations */
